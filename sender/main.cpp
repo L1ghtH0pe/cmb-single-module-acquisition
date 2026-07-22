@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 
@@ -24,12 +25,41 @@ std::uint64_t micros_between(std::chrono::steady_clock::time_point a, std::chron
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(b - a).count());
 }
 
+std::uint16_t parse_port(const char* text) {
+    const long value = std::stol(text);
+    if (value <= 0 || value > 65535) {
+        throw std::out_of_range("port must be in 1..65535");
+    }
+    return static_cast<std::uint16_t>(value);
+}
+
+std::uint64_t parse_frame_count(const char* text) {
+    const unsigned long long value = std::stoull(text);
+    if (value == 0) {
+        throw std::out_of_range("frame_count must be positive");
+    }
+    return static_cast<std::uint64_t>(value);
+}
+
+void print_usage() {
+    std::cerr << "usage: sender [host] [port] [frame_count]\n";
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-    const std::string host = argc > 1 ? argv[1] : "127.0.0.1";
-    const auto port = static_cast<std::uint16_t>(argc > 2 ? std::stoi(argv[2]) : 9000);
-    const auto frame_count = static_cast<std::uint64_t>(argc > 3 ? std::stoull(argv[3]) : 10);
+    std::string host = "127.0.0.1";
+    std::uint16_t port = 9000;
+    std::uint64_t frame_count = 10;
+    try {
+        host = argc > 1 ? argv[1] : host;
+        port = argc > 2 ? parse_port(argv[2]) : port;
+        frame_count = argc > 3 ? parse_frame_count(argv[3]) : frame_count;
+    } catch (const std::exception& ex) {
+        print_usage();
+        std::cerr << "sender argument error: " << ex.what() << "\n";
+        return 64;
+    }
 
     std::filesystem::create_directories("logs");
     cmb::common::Logger logger{"logs/sender-runtime.log"};

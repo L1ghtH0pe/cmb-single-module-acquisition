@@ -38,6 +38,8 @@ struct ProcessHandle {
     int exit_code{1};
 };
 
+constexpr std::uintmax_t kPayloadBytes = 1704 * sizeof(std::uint32_t);
+
 std::string read_file(const fs::path& path) {
     std::ifstream in(path, std::ios::binary);
     if (!in) {
@@ -55,10 +57,18 @@ std::size_t count_raw_frames(const fs::path& dir) {
     }
     for (const auto& entry : fs::directory_iterator(dir)) {
         if (entry.is_regular_file() && entry.path().filename().string().rfind("frame-", 0) == 0) {
+            if (entry.file_size() != kPayloadBytes) {
+                return 0;
+            }
             ++count;
         }
     }
     return count;
+}
+
+bool metrics_contains_frame_count(const fs::path& path, std::uint64_t frames) {
+    const auto text = read_file(path);
+    return text.find("," + std::to_string(frames) + ",") != std::string::npos && text.find(",0,0,") != std::string::npos;
 }
 
 bool contains(const std::string& text, const std::string& needle) {
@@ -232,8 +242,8 @@ int main(int argc, char** argv) {
     const auto sender_stdout = read_file("logs/sender-stdout.txt");
     const auto receiver_stdout = read_file("logs/receiver-stdout.txt");
 
-    const auto sender_metrics = fs::exists("logs/sender-metrics.csv");
-    const auto receiver_metrics = fs::exists("logs/receiver-metrics.csv");
+    const auto sender_metrics = fs::exists("logs/sender-metrics.csv") && metrics_contains_frame_count("logs/sender-metrics.csv", frames);
+    const auto receiver_metrics = fs::exists("logs/receiver-metrics.csv") && metrics_contains_frame_count("logs/receiver-metrics.csv", frames);
     const auto raw_count = count_raw_frames("captures/raw");
 
     std::cout << "sender_exit=" << sender.exit_code << '\n';

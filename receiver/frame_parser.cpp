@@ -4,20 +4,40 @@
 #include <stdexcept>
 
 namespace cmb::receiver {
+namespace {
 
-std::optional<cmb::proto::Frame> parse_frame(const std::vector<std::byte>& bytes) {
+ParseError classify_validation_error(const std::string& error) {
+    if (error.empty()) {
+        return ParseError::kNone;
+    }
+    if (error == "header crc mismatch") {
+        return ParseError::kHeaderCrc;
+    }
+    if (error == "payload crc mismatch") {
+        return ParseError::kPayloadCrc;
+    }
+    return ParseError::kUnexpectedProtocol;
+}
+
+}  // namespace
+
+ParseResult parse_frame(const std::vector<std::byte>& bytes) {
     try {
         auto frame = cmb::proto::deserialize_frame(bytes);
-        if (!cmb::proto::validate_frame(frame).empty()) {
-            return std::nullopt;
+        const auto validation_error = cmb::proto::validate_frame(frame);
+        const auto parse_error = classify_validation_error(validation_error);
+        if (parse_error != ParseError::kNone) {
+            return {.frame = std::nullopt, .error = parse_error, .message = validation_error};
         }
-        return frame;
+        return {.frame = frame, .error = ParseError::kNone, .message = {}};
+    } catch (const std::exception& ex) {
+        return {.frame = std::nullopt, .error = ParseError::kMalformed, .message = ex.what()};
     } catch (...) {
-        return std::nullopt;
+        return {.frame = std::nullopt, .error = ParseError::kMalformed, .message = "unknown parse failure"};
     }
 }
 
-std::optional<cmb::proto::Frame> parse_prefixed_frame(const std::vector<std::byte>& header_and_payload) {
+ParseResult parse_prefixed_frame(const std::vector<std::byte>& header_and_payload) {
     return parse_frame(header_and_payload);
 }
 

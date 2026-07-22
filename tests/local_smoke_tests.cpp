@@ -43,9 +43,9 @@ cmb::proto::Frame receive_one_frame(cmb::receiver::TcpReceiver& receiver) {
     frame_bytes.insert(frame_bytes.end(), header.begin(), header.end());
     frame_bytes.insert(frame_bytes.end(), payload_and_crc.begin(), payload_and_crc.end());
 
-    auto frame = cmb::receiver::parse_frame(frame_bytes);
-    assert(frame.has_value());
-    return *frame;
+    auto result = cmb::receiver::parse_frame(frame_bytes);
+    assert(result.ok());
+    return *result.frame;
 }
 
 void test_localhost_transfers_three_frames() {

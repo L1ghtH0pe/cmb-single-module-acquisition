@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import os
 import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+PAYLOAD_BYTES = 1704 * 4
 
 
 def project_root() -> Path:
@@ -26,10 +29,10 @@ def clean_runtime_dirs(root: Path) -> None:
     (root / "captures" / "meta").mkdir(parents=True, exist_ok=True)
 
 
-def count_raw_frames(raw_dir: Path) -> int:
+def raw_frame_files(raw_dir: Path) -> list[Path]:
     if not raw_dir.exists():
-        return 0
-    return sum(1 for p in raw_dir.iterdir() if p.is_file() and p.name.startswith("frame-"))
+        return []
+    return sorted(p for p in raw_dir.iterdir() if p.is_file() and p.name.startswith("frame-"))
 
 
 def read_text(path: Path) -> str:
@@ -38,16 +41,59 @@ def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
-def run_process(exe: Path, args: list[str], stdout_path: Path, stderr_path: Path, cwd: Path, env: dict[str, str]) -> int:
-    with stdout_path.open("w", encoding="utf-8") as out, stderr_path.open("w", encoding="utf-8") as err:
-        proc = subprocess.Popen([str(exe), *args], cwd=cwd, env=env, stdout=out, stderr=err)
-        return proc.wait()
+def terminate_process(proc: subprocess.Popen[str]) -> None:
+    if proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
+def read_last_metrics_row(path: Path) -> dict[str, str]:
+    with path.open("r", encoding="utf-8", newline="") as f:
+        rows = list(csv.DictReader(f))
+    if not rows:
+        raise RuntimeError(f"metrics file has no rows: {path}")
+    return rows[-1]
+
+
+def validate_metrics(root: Path, frames: int) -> None:
+    sender_row = read_last_metrics_row(root / "logs" / "sender-metrics.csv")
+    receiver_row = read_last_metrics_row(root / "logs" / "receiver-metrics.csv")
+
+    if int(sender_row["frame_count"]) != frames:
+        raise RuntimeError("sender metrics frame_count mismatch")
+    if int(receiver_row["frame_count"]) != frames:
+        raise RuntimeError("receiver metrics frame_count mismatch")
+    if int(receiver_row["parse_fail_count"]) != 0:
+        raise RuntimeError("receiver parse_fail_count is nonzero")
+    if int(receiver_row["crc_error_count"]) != 0:
+        raise RuntimeError("receiver crc_error_count is nonzero")
+    if frames > 0:
+        if int(receiver_row["frame_id_begin"]) != 0:
+            raise RuntimeError("receiver frame_id_begin mismatch")
+        if int(receiver_row["frame_id_end"]) != frames - 1:
+            raise RuntimeError("receiver frame_id_end mismatch")
+
+
+def validate_raw_files(root: Path, frames: int) -> int:
+    files = raw_frame_files(root / "captures" / "raw")
+    if len(files) != frames:
+        raise RuntimeError(f"raw file count mismatch: got {len(files)}, expected {frames}")
+    for path in files:
+        if path.stat().st_size != PAYLOAD_BYTES:
+            raise RuntimeError(f"raw file size mismatch: {path}")
+    return len(files)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=9000)
     parser.add_argument("--frames", type=int, default=100)
+    parser.add_argument("--timeout", type=float, default=30.0)
     args = parser.parse_args()
 
     root = project_root()
@@ -65,30 +111,58 @@ def main() -> int:
     sender_stdout = root / "logs" / "sender-stdout.txt"
     sender_stderr = root / "logs" / "sender-stderr.txt"
 
-    receiver_proc = subprocess.Popen(
-        [str(receiver), str(args.port), str(args.frames)],
-        cwd=root,
-        env=env,
-        stdout=receiver_stdout.open("w", encoding="utf-8"),
-        stderr=receiver_stderr.open("w", encoding="utf-8"),
-    )
+    receiver_out = receiver_stdout.open("w", encoding="utf-8")
+    receiver_err = receiver_stderr.open("w", encoding="utf-8")
+    receiver_proc: subprocess.Popen[str] | None = None
+    sender_exit = 1
+    receiver_exit = 1
+    raw_count = 0
 
-    time.sleep(1.0)
+    try:
+        receiver_proc = subprocess.Popen(
+            [str(receiver), str(args.port), str(args.frames)],
+            cwd=root,
+            env=env,
+            stdout=receiver_out,
+            stderr=receiver_err,
+            text=True,
+        )
+        time.sleep(1.0)
 
-    sender_exit = run_process(
-        sender,
-        ["127.0.0.1", str(args.port), str(args.frames)],
-        sender_stdout,
-        sender_stderr,
-        root,
-        env,
-    )
+        with sender_stdout.open("w", encoding="utf-8") as out, sender_stderr.open("w", encoding="utf-8") as err:
+            sender_proc = subprocess.Popen(
+                [str(sender), "127.0.0.1", str(args.port), str(args.frames)],
+                cwd=root,
+                env=env,
+                stdout=out,
+                stderr=err,
+                text=True,
+            )
+            try:
+                sender_exit = sender_proc.wait(timeout=args.timeout)
+            except subprocess.TimeoutExpired:
+                terminate_process(sender_proc)
+                raise RuntimeError("sender timed out")
 
-    receiver_exit = receiver_proc.wait(timeout=30)
+        try:
+            receiver_exit = receiver_proc.wait(timeout=args.timeout)
+        except subprocess.TimeoutExpired:
+            terminate_process(receiver_proc)
+            raise RuntimeError("receiver timed out")
+
+        raw_count = validate_raw_files(root, args.frames)
+        validate_metrics(root, args.frames)
+    except Exception as ex:
+        if receiver_proc is not None:
+            terminate_process(receiver_proc)
+        print(f"local_process_smoke failed: {ex}", file=sys.stderr)
+        return 1
+    finally:
+        receiver_out.close()
+        receiver_err.close()
 
     sender_text = read_text(sender_stdout)
     receiver_text = read_text(receiver_stdout)
-    raw_count = count_raw_frames(root / "captures" / "raw")
 
     print(f"sender_exit={sender_exit}")
     print(f"receiver_exit={receiver_exit}")
@@ -100,15 +174,7 @@ def main() -> int:
     print("--- receiver stdout ---")
     print(receiver_text, end="")
 
-    ok = (
-        sender_exit == 0
-        and receiver_exit == 0
-        and raw_count == args.frames
-        and (root / "logs" / "sender-metrics.csv").exists()
-        and (root / "logs" / "receiver-metrics.csv").exists()
-        and "sender sent " in sender_text
-        and "receiver received " in receiver_text
-    )
+    ok = sender_exit == 0 and receiver_exit == 0 and "sender sent " in sender_text and "receiver received " in receiver_text
     if not ok:
         print("local_process_smoke failed", file=sys.stderr)
         return 1

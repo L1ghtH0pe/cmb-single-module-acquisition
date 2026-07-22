@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -22,11 +23,39 @@ std::uint64_t micros_between(std::chrono::steady_clock::time_point a, std::chron
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(b - a).count());
 }
 
+std::uint16_t parse_port(const char* text) {
+    const long value = std::stol(text);
+    if (value <= 0 || value > 65535) {
+        throw std::out_of_range("port must be in 1..65535");
+    }
+    return static_cast<std::uint16_t>(value);
+}
+
+std::uint64_t parse_frame_count(const char* text) {
+    const unsigned long long value = std::stoull(text);
+    if (value == 0) {
+        throw std::out_of_range("expected_frame_count must be positive");
+    }
+    return static_cast<std::uint64_t>(value);
+}
+
+void print_usage() {
+    std::cerr << "usage: receiver [port] [expected_frame_count]\n";
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-    const auto port = static_cast<std::uint16_t>(argc > 1 ? std::stoi(argv[1]) : 9000);
-    const auto expected_frames = static_cast<std::uint64_t>(argc > 2 ? std::stoull(argv[2]) : 10);
+    std::uint16_t port = 9000;
+    std::uint64_t expected_frames = 10;
+    try {
+        port = argc > 1 ? parse_port(argv[1]) : port;
+        expected_frames = argc > 2 ? parse_frame_count(argv[2]) : expected_frames;
+    } catch (const std::exception& ex) {
+        print_usage();
+        std::cerr << "receiver argument error: " << ex.what() << "\n";
+        return 64;
+    }
 
     std::filesystem::create_directories("logs");
     std::filesystem::create_directories("captures/raw");
@@ -90,12 +119,18 @@ int main(int argc, char** argv) {
         frame_bytes.insert(frame_bytes.end(), header_bytes.begin(), header_bytes.end());
         frame_bytes.insert(frame_bytes.end(), payload_and_crc.begin(), payload_and_crc.end());
 
-        const auto frame = cmb::receiver::parse_frame(frame_bytes);
-        if (!frame) {
-            ++snapshot.parse_fail_count;
-            logger.log(cmb::common::LogLevel::kWarn, "parse failed at expected frame " + std::to_string(i));
+        const auto parse_result = cmb::receiver::parse_frame(frame_bytes);
+        if (!parse_result.ok()) {
+            if (parse_result.error == cmb::receiver::ParseError::kHeaderCrc ||
+                parse_result.error == cmb::receiver::ParseError::kPayloadCrc) {
+                ++snapshot.crc_error_count;
+            } else {
+                ++snapshot.parse_fail_count;
+            }
+            logger.log(cmb::common::LogLevel::kWarn, "parse failed at expected frame " + std::to_string(i) + ": " + parse_result.message);
             continue;
         }
+        const auto& frame = *parse_result.frame;
 
         const auto now = std::chrono::steady_clock::now();
         if (has_previous_receive_time) {
@@ -104,14 +139,14 @@ int main(int argc, char** argv) {
         previous_receive_time = now;
         has_previous_receive_time = true;
 
-        continuity.observe(frame->header.frame_id);
+        continuity.observe(frame.header.frame_id);
         if (snapshot.frame_count == 0) {
-            snapshot.frame_id_begin = frame->header.frame_id;
+            snapshot.frame_id_begin = frame.header.frame_id;
         }
-        snapshot.frame_id_end = frame->header.frame_id;
+        snapshot.frame_id_end = frame.header.frame_id;
         ++snapshot.frame_count;
-        if (!storage.write(*frame)) {
-            logger.log(cmb::common::LogLevel::kError, "failed to write frame " + std::to_string(frame->header.frame_id));
+        if (!storage.write(frame)) {
+            logger.log(cmb::common::LogLevel::kError, "failed to write frame " + std::to_string(frame.header.frame_id));
             return 7;
         }
     }
@@ -123,7 +158,6 @@ int main(int argc, char** argv) {
     snapshot.recv_gap_avg_us = recv_gap_stats.average();
     snapshot.recv_gap_max_us = recv_gap_stats.max();
     snapshot.recv_gap_p999_us = recv_gap_stats.percentile(0.999);
-    snapshot.crc_error_count = 0;
     snapshot.tcp_disconnect_count = 0;
     metrics.append(cmb::common::now_iso8601(), snapshot);
 
