@@ -2,6 +2,8 @@
 build/
 logs/
 captures/raw/
+captures/meta/
+storage_writer_test/
 *.exe
 *.obj
 *.o

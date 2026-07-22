@@ -29,12 +29,6 @@ def clean_runtime_dirs(root: Path) -> None:
     (root / "captures" / "meta").mkdir(parents=True, exist_ok=True)
 
 
-def raw_frame_files(raw_dir: Path) -> list[Path]:
-    if not raw_dir.exists():
-        return []
-    return sorted(p for p in raw_dir.iterdir() if p.is_file() and p.name.startswith("frame-"))
-
-
 def read_text(path: Path) -> str:
     if not path.exists():
         return ""
@@ -79,14 +73,33 @@ def validate_metrics(root: Path, frames: int) -> None:
             raise RuntimeError("receiver frame_id_end mismatch")
 
 
-def validate_raw_files(root: Path, frames: int) -> int:
-    files = raw_frame_files(root / "captures" / "raw")
-    if len(files) != frames:
-        raise RuntimeError(f"raw file count mismatch: got {len(files)}, expected {frames}")
-    for path in files:
-        if path.stat().st_size != PAYLOAD_BYTES:
-            raise RuntimeError(f"raw file size mismatch: {path}")
-    return len(files)
+def validate_capture_segments(root: Path, frames: int) -> int:
+    raw_dir = root / "captures" / "raw"
+    meta_dir = root / "captures" / "meta"
+    segments = sorted(p for p in raw_dir.glob("segment-*.bin") if p.is_file())
+    indexes = sorted(p for p in meta_dir.glob("segment-*.csv") if p.is_file())
+    if not segments:
+        raise RuntimeError("no raw capture segments written")
+    if not indexes:
+        raise RuntimeError("no capture index files written")
+
+    total_payload_bytes = sum(p.stat().st_size for p in segments)
+    expected_payload_bytes = frames * PAYLOAD_BYTES
+    if total_payload_bytes != expected_payload_bytes:
+        raise RuntimeError(f"raw payload size mismatch: got {total_payload_bytes}, expected {expected_payload_bytes}")
+
+    rows: list[dict[str, str]] = []
+    for path in indexes:
+        with path.open("r", encoding="utf-8", newline="") as f:
+            rows.extend(csv.DictReader(f))
+    if len(rows) != frames:
+        raise RuntimeError(f"index row count mismatch: got {len(rows)}, expected {frames}")
+    for i, row in enumerate(rows):
+        if int(row["frame_id"]) != i:
+            raise RuntimeError(f"index frame_id mismatch at row {i}")
+        if int(row["payload_bytes"]) != PAYLOAD_BYTES:
+            raise RuntimeError(f"index payload_bytes mismatch at row {i}")
+    return len(rows)
 
 
 def main() -> int:
@@ -116,7 +129,7 @@ def main() -> int:
     receiver_proc: subprocess.Popen[str] | None = None
     sender_exit = 1
     receiver_exit = 1
-    raw_count = 0
+    captured_frames = 0
 
     try:
         receiver_proc = subprocess.Popen(
@@ -150,7 +163,7 @@ def main() -> int:
             terminate_process(receiver_proc)
             raise RuntimeError("receiver timed out")
 
-        raw_count = validate_raw_files(root, args.frames)
+        captured_frames = validate_capture_segments(root, args.frames)
         validate_metrics(root, args.frames)
     except Exception as ex:
         if receiver_proc is not None:
@@ -166,7 +179,7 @@ def main() -> int:
 
     print(f"sender_exit={sender_exit}")
     print(f"receiver_exit={receiver_exit}")
-    print(f"raw_files={raw_count}")
+    print(f"captured_frames={captured_frames}")
     print(f"sender_metrics={'yes' if (root / 'logs' / 'sender-metrics.csv').exists() else 'no'}")
     print(f"receiver_metrics={'yes' if (root / 'logs' / 'receiver-metrics.csv').exists() else 'no'}")
     print("--- sender stdout ---")

@@ -50,29 +50,51 @@ std::string read_file(const fs::path& path) {
     return oss.str();
 }
 
-std::size_t count_raw_frames(const fs::path& dir) {
-    std::size_t count = 0;
+bool contains(const std::string& text, const std::string& needle) {
+    return text.find(needle) != std::string::npos;
+}
+
+std::size_t count_index_rows(const fs::path& dir) {
+    std::size_t rows = 0;
     if (!fs::exists(dir)) {
         return 0;
     }
     for (const auto& entry : fs::directory_iterator(dir)) {
-        if (entry.is_regular_file() && entry.path().filename().string().rfind("frame-", 0) == 0) {
-            if (entry.file_size() != kPayloadBytes) {
-                return 0;
+        if (!entry.is_regular_file() || entry.path().extension() != ".csv") {
+            continue;
+        }
+        std::ifstream in(entry.path());
+        std::string line;
+        bool first = true;
+        while (std::getline(in, line)) {
+            if (first) {
+                first = false;
+                continue;
             }
-            ++count;
+            if (!line.empty()) {
+                ++rows;
+            }
         }
     }
-    return count;
+    return rows;
+}
+
+std::uintmax_t total_segment_bytes(const fs::path& dir) {
+    std::uintmax_t total = 0;
+    if (!fs::exists(dir)) {
+        return 0;
+    }
+    for (const auto& entry : fs::directory_iterator(dir)) {
+        if (entry.is_regular_file() && entry.path().filename().string().rfind("segment-", 0) == 0 && entry.path().extension() == ".bin") {
+            total += entry.file_size();
+        }
+    }
+    return total;
 }
 
 bool metrics_contains_frame_count(const fs::path& path, std::uint64_t frames) {
     const auto text = read_file(path);
-    return text.find("," + std::to_string(frames) + ",") != std::string::npos && text.find(",0,0,") != std::string::npos;
-}
-
-bool contains(const std::string& text, const std::string& needle) {
-    return text.find(needle) != std::string::npos;
+    return contains(text, "," + std::to_string(frames) + ",") && contains(text, ",0,0,");
 }
 
 fs::path exe_name(const std::string& base) {
@@ -117,17 +139,7 @@ ProcessHandle start_process(const fs::path& exe, const std::vector<std::string>&
     std::string cmdline = cmd.str();
 
     ProcessHandle handle{};
-    BOOL ok = CreateProcessA(
-        nullptr,
-        cmdline.data(),
-        nullptr,
-        nullptr,
-        TRUE,
-        0,
-        nullptr,
-        nullptr,
-        &si,
-        &handle.info);
+    BOOL ok = CreateProcessA(nullptr, cmdline.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &handle.info);
 
     CloseHandle(out_handle);
     CloseHandle(err_handle);
@@ -139,14 +151,28 @@ ProcessHandle start_process(const fs::path& exe, const std::vector<std::string>&
     return handle;
 }
 
-int wait_process(ProcessHandle& handle) {
-    WaitForSingleObject(handle.info.hProcess, INFINITE);
+bool wait_process(ProcessHandle& handle, std::chrono::milliseconds timeout) {
+    const DWORD rc = WaitForSingleObject(handle.info.hProcess, static_cast<DWORD>(timeout.count()));
+    if (rc != WAIT_OBJECT_0) {
+        return false;
+    }
     DWORD code = 1;
     GetExitCodeProcess(handle.info.hProcess, &code);
     CloseHandle(handle.info.hThread);
     CloseHandle(handle.info.hProcess);
+    handle.info = {};
     handle.exit_code = static_cast<int>(code);
-    return handle.exit_code;
+    return true;
+}
+
+void terminate_process(ProcessHandle& handle) {
+    if (handle.info.hProcess != nullptr) {
+        TerminateProcess(handle.info.hProcess, 1);
+        WaitForSingleObject(handle.info.hProcess, 5000);
+        CloseHandle(handle.info.hThread);
+        CloseHandle(handle.info.hProcess);
+        handle.info = {};
+    }
 }
 #else
 ProcessHandle start_process(const fs::path& exe, const std::vector<std::string>& args, const fs::path& stdout_path, const fs::path& stderr_path) {
@@ -180,19 +206,39 @@ ProcessHandle start_process(const fs::path& exe, const std::vector<std::string>&
     return handle;
 }
 
-int wait_process(ProcessHandle& handle) {
-    int status = 1;
-    waitpid(handle.pid, &status, 0);
-    if (WIFEXITED(status)) {
-        handle.exit_code = WEXITSTATUS(status);
+bool wait_process(ProcessHandle& handle, std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        int status = 0;
+        const pid_t rc = waitpid(handle.pid, &status, WNOHANG);
+        if (rc == handle.pid) {
+            if (WIFEXITED(status)) {
+                handle.exit_code = WEXITSTATUS(status);
+            }
+            handle.pid = -1;
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
-    return handle.exit_code;
+    return false;
+}
+
+void terminate_process(ProcessHandle& handle) {
+    if (handle.pid > 0) {
+        kill(handle.pid, SIGTERM);
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        kill(handle.pid, SIGKILL);
+        int status = 0;
+        waitpid(handle.pid, &status, 0);
+        handle.pid = -1;
+    }
 }
 #endif
 
 void clean_runtime_dirs() {
     fs::remove_all("logs");
     fs::remove_all("captures/raw");
+    fs::remove_all("captures/meta");
     fs::create_directories("logs");
     fs::create_directories("captures/raw");
     fs::create_directories("captures/meta");
@@ -203,6 +249,7 @@ void clean_runtime_dirs() {
 int main(int argc, char** argv) {
     const auto port = static_cast<std::uint16_t>(argc > 1 ? std::stoi(argv[1]) : 9000);
     const auto frames = static_cast<std::uint64_t>(argc > 2 ? std::stoull(argv[2]) : 100);
+    const auto timeout = std::chrono::seconds(argc > 3 ? std::stoi(argv[3]) : 30);
 
     clean_runtime_dirs();
 
@@ -232,29 +279,41 @@ int main(int argc, char** argv) {
         sender.pid < 0
 #endif
     ) {
+        terminate_process(receiver);
         std::cerr << "failed to start sender\n";
         return 1;
     }
 
-    wait_process(sender);
-    wait_process(receiver);
+    if (!wait_process(sender, timeout)) {
+        terminate_process(sender);
+        terminate_process(receiver);
+        std::cerr << "sender timed out\n";
+        return 1;
+    }
+    if (!wait_process(receiver, timeout)) {
+        terminate_process(receiver);
+        std::cerr << "receiver timed out\n";
+        return 1;
+    }
 
     const auto sender_stdout = read_file("logs/sender-stdout.txt");
     const auto receiver_stdout = read_file("logs/receiver-stdout.txt");
 
     const auto sender_metrics = fs::exists("logs/sender-metrics.csv") && metrics_contains_frame_count("logs/sender-metrics.csv", frames);
     const auto receiver_metrics = fs::exists("logs/receiver-metrics.csv") && metrics_contains_frame_count("logs/receiver-metrics.csv", frames);
-    const auto raw_count = count_raw_frames("captures/raw");
+    const auto captured_frames = count_index_rows("captures/meta");
+    const auto raw_bytes = total_segment_bytes("captures/raw");
 
     std::cout << "sender_exit=" << sender.exit_code << '\n';
     std::cout << "receiver_exit=" << receiver.exit_code << '\n';
-    std::cout << "raw_files=" << raw_count << '\n';
+    std::cout << "captured_frames=" << captured_frames << '\n';
+    std::cout << "raw_bytes=" << raw_bytes << '\n';
     std::cout << "sender_metrics=" << (sender_metrics ? "yes" : "no") << '\n';
     std::cout << "receiver_metrics=" << (receiver_metrics ? "yes" : "no") << '\n';
     std::cout << "--- sender stdout ---\n" << sender_stdout;
     std::cout << "--- receiver stdout ---\n" << receiver_stdout;
 
-    const bool ok = sender.exit_code == 0 && receiver.exit_code == 0 && raw_count == frames && sender_metrics && receiver_metrics && contains(sender_stdout, "sender sent ") && contains(receiver_stdout, "receiver received ");
+    const bool ok = sender.exit_code == 0 && receiver.exit_code == 0 && captured_frames == frames && raw_bytes == frames * kPayloadBytes && sender_metrics && receiver_metrics && contains(sender_stdout, "sender sent ") && contains(receiver_stdout, "receiver received ");
     if (!ok) {
         std::cerr << "local_process_smoke failed\n";
         return 1;

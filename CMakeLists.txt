@@ -58,6 +58,12 @@ add_executable(parser_tests
 )
 target_link_libraries(parser_tests PRIVATE common_lib)
 
+add_executable(storage_tests
+    tests/storage_tests.cpp
+    receiver/storage_writer.cpp
+)
+target_link_libraries(storage_tests PRIVATE common_lib)
+
 add_executable(local_smoke_tests
     tests/local_smoke_tests.cpp
     sender/data_simulator.cpp
@@ -85,5 +91,6 @@ enable_testing()
 add_test(NAME frame_tests COMMAND frame_tests)
 add_test(NAME stats_tests COMMAND stats_tests)
 add_test(NAME parser_tests COMMAND parser_tests)
+add_test(NAME storage_tests COMMAND storage_tests)
 add_test(NAME local_smoke_tests COMMAND local_smoke_tests)
 add_test(NAME local_process_smoke COMMAND local_process_smoke)
