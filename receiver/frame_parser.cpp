@@ -6,6 +6,14 @@
 namespace cmb::receiver {
 namespace {
 
+std::uint32_t read_u32_le(const std::vector<std::byte>& bytes, std::size_t offset) {
+    std::uint32_t value = 0;
+    for (std::size_t i = 0; i < sizeof(value); ++i) {
+        value |= static_cast<std::uint32_t>(static_cast<unsigned char>(bytes[offset + i])) << (8 * i);
+    }
+    return value;
+}
+
 ParseError classify_validation_error(const std::string& error) {
     if (error.empty()) {
         return ParseError::kNone;
@@ -45,8 +53,7 @@ std::uint32_t peek_header_len(const std::vector<std::byte>& prefix) {
     if (prefix.size() != sizeof(std::uint32_t)) {
         throw std::runtime_error("header length prefix must be 4 bytes");
     }
-    std::uint32_t header_len = 0;
-    std::memcpy(&header_len, prefix.data(), sizeof(header_len));
+    const std::uint32_t header_len = read_u32_le(prefix, 0);
     if (header_len != cmb::proto::kHeaderSize) {
         throw std::runtime_error("unexpected header length");
     }
@@ -69,9 +76,7 @@ std::uint32_t peek_payload_len(const std::vector<std::byte>& header_bytes) {
         sizeof(std::uint16_t) +     // channel_count
         sizeof(std::uint16_t);      // sample_rate_hz
 
-    std::uint32_t payload_len = 0;
-    std::memcpy(&payload_len, header_bytes.data() + payload_len_offset, sizeof(payload_len));
-    return payload_len;
+    return read_u32_le(header_bytes, payload_len_offset);
 }
 
 }  // namespace cmb::receiver

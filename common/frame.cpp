@@ -9,26 +9,44 @@
 namespace cmb::proto {
 namespace {
 
+template <typename UInt>
+void put_le(std::vector<std::byte>& bytes, UInt value) {
+    for (std::size_t i = 0; i < sizeof(UInt); ++i) {
+        bytes.push_back(static_cast<std::byte>((value >> (8 * i)) & 0xFF));
+    }
+}
+
+template <typename UInt>
+void put_le(std::array<std::byte, kHeaderSize>& bytes, std::size_t& offset, UInt value) {
+    for (std::size_t i = 0; i < sizeof(UInt); ++i) {
+        bytes[offset++] = static_cast<std::byte>((value >> (8 * i)) & 0xFF);
+    }
+}
+
+template <typename UInt>
+UInt get_le(std::span<const std::byte> bytes, std::size_t& offset) {
+    UInt value = 0;
+    for (std::size_t i = 0; i < sizeof(UInt); ++i) {
+        value |= static_cast<UInt>(static_cast<unsigned char>(bytes[offset++])) << (8 * i);
+    }
+    return value;
+}
+
 std::array<std::byte, kHeaderSize> encode_header(FrameHeader header) {
     std::array<std::byte, kHeaderSize> bytes{};
     std::size_t offset = 0;
 
-    auto put = [&](auto value) {
-        std::memcpy(bytes.data() + offset, &value, sizeof(value));
-        offset += sizeof(value);
-    };
-
-    put(header.magic);
-    put(header.version);
-    put(header.header_size);
-    put(header.module_id);
-    put(header.flags);
-    put(header.frame_id);
-    put(header.timestamp_ns);
-    put(header.channel_count);
-    put(header.sample_rate_hz);
-    put(header.payload_len);
-    put(header.header_crc);
+    put_le(bytes, offset, header.magic);
+    put_le(bytes, offset, header.version);
+    put_le(bytes, offset, header.header_size);
+    put_le(bytes, offset, header.module_id);
+    put_le(bytes, offset, header.flags);
+    put_le(bytes, offset, header.frame_id);
+    put_le(bytes, offset, header.timestamp_ns);
+    put_le(bytes, offset, header.channel_count);
+    put_le(bytes, offset, header.sample_rate_hz);
+    put_le(bytes, offset, header.payload_len);
+    put_le(bytes, offset, header.header_crc);
 
     return bytes;
 }
@@ -41,22 +59,17 @@ FrameHeader decode_header(std::span<const std::byte> bytes) {
     FrameHeader header{};
     std::size_t offset = 0;
 
-    auto get = [&](auto& value) {
-        std::memcpy(&value, bytes.data() + offset, sizeof(value));
-        offset += sizeof(value);
-    };
-
-    get(header.magic);
-    get(header.version);
-    get(header.header_size);
-    get(header.module_id);
-    get(header.flags);
-    get(header.frame_id);
-    get(header.timestamp_ns);
-    get(header.channel_count);
-    get(header.sample_rate_hz);
-    get(header.payload_len);
-    get(header.header_crc);
+    header.magic = get_le<std::uint32_t>(bytes, offset);
+    header.version = get_le<std::uint16_t>(bytes, offset);
+    header.header_size = get_le<std::uint16_t>(bytes, offset);
+    header.module_id = get_le<std::uint16_t>(bytes, offset);
+    header.flags = get_le<std::uint16_t>(bytes, offset);
+    header.frame_id = get_le<std::uint64_t>(bytes, offset);
+    header.timestamp_ns = get_le<std::uint64_t>(bytes, offset);
+    header.channel_count = get_le<std::uint16_t>(bytes, offset);
+    header.sample_rate_hz = get_le<std::uint16_t>(bytes, offset);
+    header.payload_len = get_le<std::uint32_t>(bytes, offset);
+    header.header_crc = get_le<std::uint32_t>(bytes, offset);
 
     return header;
 }
@@ -78,15 +91,14 @@ std::vector<std::byte> serialize_frame(const Frame& frame) {
     result.reserve(sizeof(std::uint32_t) + header_bytes.size() + header.payload_len + sizeof(std::uint32_t));
 
     const std::uint32_t header_len = static_cast<std::uint32_t>(header_bytes.size());
-    const auto* header_len_bytes = reinterpret_cast<const std::byte*>(&header_len);
-    result.insert(result.end(), header_len_bytes, header_len_bytes + sizeof(header_len));
+    put_le(result, header_len);
     result.insert(result.end(), header_bytes.begin(), header_bytes.end());
 
-    const auto* payload_bytes = reinterpret_cast<const std::byte*>(frame.payload.data());
-    result.insert(result.end(), payload_bytes, payload_bytes + header.payload_len);
+    for (const auto sample : frame.payload) {
+        put_le(result, sample);
+    }
 
-    const auto* payload_crc_bytes = reinterpret_cast<const std::byte*>(&payload_crc_value);
-    result.insert(result.end(), payload_crc_bytes, payload_crc_bytes + sizeof(payload_crc_value));
+    put_le(result, payload_crc_value);
 
     return result;
 }
@@ -96,8 +108,8 @@ Frame deserialize_frame(std::span<const std::byte> bytes) {
         throw std::runtime_error("frame too short");
     }
 
-    std::uint32_t header_len = 0;
-    std::memcpy(&header_len, bytes.data(), sizeof(header_len));
+    std::size_t prefix_offset = 0;
+    const std::uint32_t header_len = get_le<std::uint32_t>(bytes, prefix_offset);
     if (header_len != kHeaderSize) {
         throw std::runtime_error("unexpected header length");
     }
@@ -122,8 +134,11 @@ Frame deserialize_frame(std::span<const std::byte> bytes) {
     frame.payload.resize(payload_count);
 
     const auto payload_offset = sizeof(header_len) + header_len;
-    std::memcpy(frame.payload.data(), bytes.data() + payload_offset, frame.header.payload_len);
-    std::memcpy(&frame.payload_crc, bytes.data() + payload_offset + frame.header.payload_len, sizeof(frame.payload_crc));
+    std::size_t payload_cursor = payload_offset;
+    for (auto& sample : frame.payload) {
+        sample = get_le<std::uint32_t>(bytes, payload_cursor);
+    }
+    frame.payload_crc = get_le<std::uint32_t>(bytes, payload_cursor);
 
     return frame;
 }

@@ -72,6 +72,17 @@ void test_deserialize_rejects_misaligned_payload_length() {
     assert(threw);
 }
 
+void test_wire_format_uses_little_endian() {
+    auto frame = make_sample_frame();
+    const auto bytes = cmb::proto::serialize_frame(frame);
+    assert(static_cast<unsigned char>(bytes[0]) == 40);
+    assert(static_cast<unsigned char>(bytes[1]) == 0);
+    assert(static_cast<unsigned char>(bytes[4]) == 0x31);
+    assert(static_cast<unsigned char>(bytes[5]) == 0x42);
+    assert(static_cast<unsigned char>(bytes[6]) == 0x4D);
+    assert(static_cast<unsigned char>(bytes[7]) == 0x43);
+}
+
 }  // namespace
 
 int main() {
@@ -79,6 +90,7 @@ int main() {
     test_reserialize_round_trip();
     test_validate_rejects_bad_magic();
     test_deserialize_rejects_misaligned_payload_length();
+    test_wire_format_uses_little_endian();
     std::cout << "frame_tests passed\n";
     return 0;
 }
