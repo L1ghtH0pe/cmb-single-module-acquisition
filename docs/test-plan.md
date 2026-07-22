@@ -231,6 +231,24 @@ B 组：Ubuntu 24.04 对应 PREEMPT_RT 内核
 - IRQ 干扰迹象
 - 长稳测试失败次数
 
+### Ubuntu 24.04 快速基线
+
+原生 Linux 上先跑：
+
+```bash
+bash tools/ubuntu-build-test.sh
+bash tools/run-local-smoke.sh 9000 1000 90
+bash tools/run-local-smoke.sh 9000 120000 900
+```
+
+以上分别覆盖：
+
+- 编译与 CTest 单元/集成测试
+- 1000 帧短 smoke
+- 10 分钟 / 120000 帧本机 soak
+
+详细步骤见 `docs/ubuntu-runbook.md`。
+
 ## 当前未决项
 
 以下事项不阻塞第一阶段启动，但需要在后续尽快确认：

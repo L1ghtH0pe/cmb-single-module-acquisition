@@ -12,6 +12,7 @@
 #include <ws2tcpip.h>
 #else
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -61,32 +62,42 @@ TcpReceiver::~TcpReceiver() {
     close();
 }
 
-bool TcpReceiver::listen_on(std::uint16_t port) {
+bool TcpReceiver::listen_on(std::uint16_t port, const std::string& bind_host) {
     close();
 
-    listen_socket_ = static_cast<SocketHandle>(::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP));
-    if (listen_socket_ == kInvalidSocket) {
+    addrinfo hints{};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+    hints.ai_flags = AI_PASSIVE;
+
+    addrinfo* results = nullptr;
+    const auto port_text = std::to_string(port);
+    const char* node = bind_host.empty() || bind_host == "0.0.0.0" ? nullptr : bind_host.c_str();
+    if (getaddrinfo(node, port_text.c_str(), &hints, &results) != 0) {
         return false;
     }
 
-    int reuse = 1;
-    setsockopt(static_cast<NativeSocket>(listen_socket_), SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&reuse), sizeof(reuse));
+    bool listening = false;
+    for (auto* rp = results; rp != nullptr; rp = rp->ai_next) {
+        listen_socket_ = static_cast<SocketHandle>(::socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol));
+        if (listen_socket_ == kInvalidSocket) {
+            continue;
+        }
 
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    addr.sin_port = htons(port);
+        int reuse = 1;
+        setsockopt(static_cast<NativeSocket>(listen_socket_), SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&reuse), sizeof(reuse));
 
-    if (::bind(static_cast<NativeSocket>(listen_socket_), reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        if (::bind(static_cast<NativeSocket>(listen_socket_), rp->ai_addr, static_cast<int>(rp->ai_addrlen)) == 0 &&
+            ::listen(static_cast<NativeSocket>(listen_socket_), 1) == 0) {
+            listening = true;
+            break;
+        }
         close();
-        return false;
-    }
-    if (::listen(static_cast<NativeSocket>(listen_socket_), 1) != 0) {
-        close();
-        return false;
     }
 
-    return true;
+    freeaddrinfo(results);
+    return listening;
 }
 
 bool TcpReceiver::accept_one() {

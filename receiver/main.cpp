@@ -40,7 +40,7 @@ std::uint64_t parse_frame_count(const char* text) {
 }
 
 void print_usage() {
-    std::cerr << "usage: receiver [port] [expected_frame_count]\n";
+    std::cerr << "usage: receiver [port] [expected_frame_count] [bind_host]\n";
 }
 
 }  // namespace
@@ -48,9 +48,11 @@ void print_usage() {
 int main(int argc, char** argv) {
     std::uint16_t port = 9000;
     std::uint64_t expected_frames = 10;
+    std::string bind_host = "0.0.0.0";
     try {
         port = argc > 1 ? parse_port(argv[1]) : port;
         expected_frames = argc > 2 ? parse_frame_count(argv[2]) : expected_frames;
+        bind_host = argc > 3 ? argv[3] : bind_host;
     } catch (const std::exception& ex) {
         print_usage();
         std::cerr << "receiver argument error: " << ex.what() << "\n";
@@ -64,13 +66,13 @@ int main(int argc, char** argv) {
     metrics.write_header();
 
     cmb::receiver::TcpReceiver receiver;
-    if (!receiver.listen_on(port)) {
-        logger.log(cmb::common::LogLevel::kError, "failed to listen on port " + std::to_string(port));
+    if (!receiver.listen_on(port, bind_host)) {
+        logger.log(cmb::common::LogLevel::kError, "failed to listen on " + bind_host + ":" + std::to_string(port));
         return 1;
     }
 
-    logger.log(cmb::common::LogLevel::kInfo, "listening on port " + std::to_string(port));
-    std::cout << "receiver listening on port " << port << "\n";
+    logger.log(cmb::common::LogLevel::kInfo, "listening on " + bind_host + ":" + std::to_string(port));
+    std::cout << "receiver listening on " << bind_host << ':' << port << "\n";
 
     if (!receiver.accept_one()) {
         logger.log(cmb::common::LogLevel::kError, "failed to accept client");

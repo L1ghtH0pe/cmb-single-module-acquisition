@@ -257,7 +257,7 @@ int main(int argc, char** argv) {
     const auto sender_exe = exe_name("sender");
 
     std::cout << "starting receiver: " << receiver_exe.string() << '\n';
-    auto receiver = start_process(receiver_exe, {std::to_string(port), std::to_string(frames)}, "logs/receiver-stdout.txt", "logs/receiver-stderr.txt");
+    auto receiver = start_process(receiver_exe, {std::to_string(port), std::to_string(frames), "0.0.0.0"}, "logs/receiver-stdout.txt", "logs/receiver-stderr.txt");
     if (
 #ifdef _WIN32
         receiver.info.hProcess == nullptr

@@ -12,6 +12,7 @@
 #include <ws2tcpip.h>
 #else
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
@@ -65,28 +66,36 @@ TcpSender::~TcpSender() {
 bool TcpSender::connect_to(const std::string& host, std::uint16_t port) {
     close();
 
-    socket_ = static_cast<SocketHandle>(::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP));
-    if (socket_ == kInvalidSocket) {
+    addrinfo hints{};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+
+    addrinfo* results = nullptr;
+    const auto port_text = std::to_string(port);
+    if (getaddrinfo(host.c_str(), port_text.c_str(), &hints, &results) != 0) {
         return false;
     }
 
-    int flag = 1;
-    setsockopt(static_cast<NativeSocket>(socket_), IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&flag), sizeof(flag));
+    bool connected = false;
+    for (auto* rp = results; rp != nullptr; rp = rp->ai_next) {
+        socket_ = static_cast<SocketHandle>(::socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol));
+        if (socket_ == kInvalidSocket) {
+            continue;
+        }
 
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
+        int flag = 1;
+        setsockopt(static_cast<NativeSocket>(socket_), IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&flag), sizeof(flag));
+
+        if (::connect(static_cast<NativeSocket>(socket_), rp->ai_addr, static_cast<int>(rp->ai_addrlen)) == 0) {
+            connected = true;
+            break;
+        }
         close();
-        return false;
     }
 
-    if (::connect(static_cast<NativeSocket>(socket_), reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-        close();
-        return false;
-    }
-
-    return true;
+    freeaddrinfo(results);
+    return connected;
 }
 
 bool TcpSender::send(const std::vector<std::byte>& bytes) {

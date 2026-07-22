@@ -160,6 +160,35 @@ journalctl -b
 captures/meta/
 ```
 
+## Ubuntu 24.04 快速复现
+
+在 Ubuntu 24.04 上安装基础依赖：
+
+```bash
+sudo apt update
+sudo apt install -y build-essential cmake ninja-build python3 git iproute2 ethtool iperf3
+```
+
+构建并运行测试：
+
+```bash
+bash tools/ubuntu-build-test.sh
+```
+
+运行 localhost smoke：
+
+```bash
+bash tools/run-local-smoke.sh 9000 1000 90
+```
+
+10 分钟本机 soak：
+
+```bash
+bash tools/run-local-smoke.sh 9000 120000 900
+```
+
+完整原生 Linux 流程见 `docs/ubuntu-runbook.md`。
+
 ## 链路验证步骤
 
 1. 接通 SFP+ 光模块与光纤

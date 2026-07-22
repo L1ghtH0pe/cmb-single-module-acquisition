@@ -105,19 +105,29 @@ def validate_capture_segments(root: Path, frames: int) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=9000)
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--bind-host", default="0.0.0.0")
     parser.add_argument("--frames", type=int, default=100)
     parser.add_argument("--timeout", type=float, default=30.0)
+    parser.add_argument("--build-dir", default="build")
+    parser.add_argument("--prepend-path", action="append", default=[])
     args = parser.parse_args()
 
     root = project_root()
-    build_dir = root / "build"
+    build_dir = Path(args.build_dir)
+    if not build_dir.is_absolute():
+        build_dir = root / build_dir
     clean_runtime_dirs(root)
 
     receiver = build_dir / exe_name("receiver")
     sender = build_dir / exe_name("sender")
 
     env = os.environ.copy()
-    env["PATH"] = str(Path("/c/msys64/ucrt64/bin")) + os.pathsep + env.get("PATH", "")
+    prepend_paths = list(args.prepend_path)
+    if os.name == "nt" and not prepend_paths:
+        prepend_paths.append("C:/msys64/ucrt64/bin")
+    if prepend_paths:
+        env["PATH"] = os.pathsep.join(prepend_paths + [env.get("PATH", "")])
 
     receiver_stdout = root / "logs" / "receiver-stdout.txt"
     receiver_stderr = root / "logs" / "receiver-stderr.txt"
@@ -133,7 +143,7 @@ def main() -> int:
 
     try:
         receiver_proc = subprocess.Popen(
-            [str(receiver), str(args.port), str(args.frames)],
+            [str(receiver), str(args.port), str(args.frames), args.bind_host],
             cwd=root,
             env=env,
             stdout=receiver_out,
@@ -144,7 +154,7 @@ def main() -> int:
 
         with sender_stdout.open("w", encoding="utf-8") as out, sender_stderr.open("w", encoding="utf-8") as err:
             sender_proc = subprocess.Popen(
-                [str(sender), "127.0.0.1", str(args.port), str(args.frames)],
+                [str(sender), args.host, str(args.port), str(args.frames)],
                 cwd=root,
                 env=env,
                 stdout=out,
