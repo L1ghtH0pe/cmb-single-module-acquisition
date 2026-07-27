@@ -14,7 +14,8 @@ void MetricsWriter::write_header() {
     std::lock_guard lock(mutex_);
     stream_ << "timestamp,frame_id_begin,frame_id_end,frame_count,parse_fail_count,crc_error_count,"
                "tcp_disconnect_count,reconnect_ms,send_period_avg_us,send_period_max_us,send_period_p999_us,"
-               "recv_gap_avg_us,recv_gap_max_us,recv_gap_p999_us,cpu_percent,rss_mb\n";
+               "recv_gap_avg_us,recv_gap_max_us,recv_gap_p999_us,recv_deadline_us,recv_deadline_miss_count,"
+               "recv_max_late_us,cpu_percent,rss_mb\n";
     stream_.flush();
 }
 
@@ -34,6 +35,9 @@ void MetricsWriter::append(const std::string& timestamp, const MetricsSnapshot& 
             << snapshot.recv_gap_avg_us << ','
             << snapshot.recv_gap_max_us << ','
             << snapshot.recv_gap_p999_us << ','
+            << snapshot.recv_deadline_us << ','
+            << snapshot.recv_deadline_miss_count << ','
+            << snapshot.recv_max_late_us << ','
             << snapshot.cpu_percent << ','
             << snapshot.rss_mb << '\n';
     stream_.flush();

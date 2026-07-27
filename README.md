@@ -456,6 +456,54 @@ bash tools/run-local-smoke.sh 9000 120000 900
 
 结论：本机 happy path 已经稳定到 10 分钟，但 Windows 调度长尾明显，不能替代真实上位机服务器和真实链路验收。
 
+## 200 Hz 实时性测试方案
+
+第一阶段不做两机时钟同步，只用 receiver 自己的 `steady_clock` 测逐帧到达间隔。
+
+### 测试目标
+
+证明 receiver 能否稳定以 200 Hz 接收 frame，也就是每帧约 5000 us 一次。
+
+### 测试方法
+
+receiver 启动后会写两个文件：
+
+- `logs/receiver-metrics.csv`
+- `logs/receiver-timing.csv`
+
+其中 `receiver-timing.csv` 每帧一行，包含：
+
+- `frame_id`
+- `recv_done_steady_ns`
+- `recv_gap_us`
+- `deadline_us`
+- `late_us`
+- `deadline_miss`
+
+第一版判据：
+
+- 目标周期：5000 us
+- 接收 deadline：5500 us
+- `frame_id` 连续
+- `parse_fail_count = 0`
+- `crc_error_count = 0`
+- `tcp_disconnect_count = 0`
+- `recv_deadline_miss_count = 0`
+
+### 结论怎么判
+
+如果所有帧都满足：
+
+- `recv_gap_us <= 5500`
+- 没有 frame gap
+- 没有 CRC 错误
+- 没有解析失败
+- 没有 TCP 断连
+
+就可以认为这条光纤链路满足当前版本的 200 Hz 实时到达要求。
+
+如果后面要测单帧端到端延迟，再做 PTP + 硬件时间戳，不和这一步混在一起。
+
 ## 当前未决项
 
 - 上位机服务器 CPU 架构和操作系统

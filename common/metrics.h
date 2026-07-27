@@ -22,6 +22,9 @@ struct MetricsSnapshot {
     std::uint64_t recv_gap_avg_us{0};
     std::uint64_t recv_gap_max_us{0};
     std::uint64_t recv_gap_p999_us{0};
+    std::uint64_t recv_deadline_us{0};
+    std::uint64_t recv_deadline_miss_count{0};
+    std::uint64_t recv_max_late_us{0};
     double cpu_percent{0.0};
     std::uint64_t rss_mb{0};
 };

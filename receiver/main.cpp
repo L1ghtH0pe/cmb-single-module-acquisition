@@ -12,12 +12,21 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace {
+
+constexpr std::uint64_t kFramePeriodUs = 5000;
+constexpr std::uint64_t kRecvDeadlineSlackUs = 500;
+constexpr std::uint64_t kRecvDeadlineUs = kFramePeriodUs + kRecvDeadlineSlackUs;
+
+std::uint64_t steady_ns(std::chrono::steady_clock::time_point time_point) {
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(time_point.time_since_epoch()).count());
+}
 
 std::uint64_t micros_between(std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b) {
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(b - a).count());
@@ -64,6 +73,13 @@ int main(int argc, char** argv) {
     cmb::common::Logger logger{"logs/receiver-runtime.log"};
     cmb::common::MetricsWriter metrics{"logs/receiver-metrics.csv"};
     metrics.write_header();
+
+    std::ofstream timing{"logs/receiver-timing.csv"};
+    if (!timing) {
+        logger.log(cmb::common::LogLevel::kError, "failed to open receiver timing log");
+        return 8;
+    }
+    timing << "frame_id,recv_done_steady_ns,recv_gap_us,deadline_us,late_us,deadline_miss\n";
 
     cmb::receiver::TcpReceiver receiver;
     if (!receiver.listen_on(port, bind_host)) {
@@ -135,11 +151,25 @@ int main(int argc, char** argv) {
         const auto& frame = *parse_result.frame;
 
         const auto now = std::chrono::steady_clock::now();
+        const auto recv_done_ns = steady_ns(now);
+        std::uint64_t recv_gap_us = 0;
+        std::uint64_t late_us = 0;
+        bool deadline_miss = false;
         if (has_previous_receive_time) {
-            recv_gap_stats.add(micros_between(previous_receive_time, now));
+            recv_gap_us = micros_between(previous_receive_time, now);
+            recv_gap_stats.add(recv_gap_us);
+            if (recv_gap_us > kRecvDeadlineUs) {
+                deadline_miss = true;
+                late_us = recv_gap_us - kRecvDeadlineUs;
+                ++snapshot.recv_deadline_miss_count;
+                if (late_us > snapshot.recv_max_late_us) {
+                    snapshot.recv_max_late_us = late_us;
+                }
+            }
         }
         previous_receive_time = now;
         has_previous_receive_time = true;
+        timing << frame.header.frame_id << ',' << recv_done_ns << ',' << recv_gap_us << ',' << kRecvDeadlineUs << ',' << late_us << ',' << (deadline_miss ? 1 : 0) << '\n';
 
         continuity.observe(frame.header.frame_id);
         if (snapshot.frame_count == 0) {
@@ -160,6 +190,7 @@ int main(int argc, char** argv) {
     snapshot.recv_gap_avg_us = recv_gap_stats.average();
     snapshot.recv_gap_max_us = recv_gap_stats.max();
     snapshot.recv_gap_p999_us = recv_gap_stats.percentile(0.999);
+    snapshot.recv_deadline_us = kRecvDeadlineUs;
     snapshot.tcp_disconnect_count = 0;
     metrics.append(cmb::common::now_iso8601(), snapshot);
 
