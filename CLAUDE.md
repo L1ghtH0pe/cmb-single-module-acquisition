@@ -1,6 +1,11 @@
 # 项目协作说明
 
-本项目当前聚焦于 CMB 单模块高速并行数据获取原型。主线方案已经锁定为：MS-01 x86、Ubuntu 24.04 LTS、原生 Linux、TCP 第一版 framing、24h/72h 稳定性测试、PREEMPT_RT 仅做 A/B 备选。
+本项目当前聚焦于 CMB 单模块高速并行数据获取原型。主线方案已经锁定为：MS-01 x86、上位机操作系统待确认（不要预设为 Ubuntu 24.04；如确认为 Linux，则优先原生 Linux）、TCP 第一版 framing、24h/72h 稳定性测试、PREEMPT_RT 仅做 A/B 备选。
+
+## Hard constraints
+
+- 上位机操作系统目前不确定：后续讨论、方案、文档和代码说明中，不要把上位机系统默认写成 Ubuntu 24.04；应写为“待确认”或按用户后续明确指定的系统处理。
+- 本项目之后不要再提出、推荐、比较或选择 FPGA/Zynq 方案；在任何架构讨论中，永远不要选择 FPGA/Zynq 路线。
 
 ## Skill routing
 
@@ -147,7 +152,4 @@
 
 ## Documentation map
 
-- `docs/system-spec.md`：系统范围、硬件基线、操作系统与总体架构
-- `docs/environment-setup.md`：Ubuntu 24.04 环境搭建、工具链、调优基线
-- `docs/protocol-v0.1.md`：TCP frame 协议、发送端/接收端软件结构
-- `docs/test-plan.md`：24h/72h 稳定性测试、验收标准、PREEMPT_RT A/B 方案
+- `README.md`：项目总文档，包含系统范围、部署方法、协议 v0.1、测试路线、验收指标和当前未决项
