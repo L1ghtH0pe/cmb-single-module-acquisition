@@ -3,5 +3,6 @@
 namespace cmb::sender {
 
 cmb::proto::Frame make_frame(std::uint64_t frame_id, std::uint64_t timestamp_ns);
+void fill_frame(cmb::proto::Frame& frame, std::uint64_t frame_id, std::uint64_t timestamp_ns);
 
 }  // namespace cmb::sender

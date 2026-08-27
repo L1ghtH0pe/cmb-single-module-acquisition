@@ -98,7 +98,7 @@ bool TcpSender::connect_to(const std::string& host, std::uint16_t port) {
     return connected;
 }
 
-bool TcpSender::send(const std::vector<std::byte>& bytes) {
+bool TcpSender::send(std::span<const std::byte> bytes) {
     if (socket_ == kInvalidSocket) {
         return false;
     }
@@ -116,6 +116,10 @@ bool TcpSender::send(const std::vector<std::byte>& bytes) {
 
     ++sent_frames_;
     return true;
+}
+
+bool TcpSender::send(const std::vector<std::byte>& bytes) {
+    return send(std::span<const std::byte>(bytes));
 }
 
 void TcpSender::close() {

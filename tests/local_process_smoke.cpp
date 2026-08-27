@@ -97,6 +97,22 @@ bool metrics_contains_frame_count(const fs::path& path, std::uint64_t frames) {
     return contains(text, "," + std::to_string(frames) + ",") && contains(text, ",0,0,");
 }
 
+bool csv_has_header_and_rows(const fs::path& path, const std::string& header_prefix, std::uint64_t expected_rows) {
+    std::ifstream in(path);
+    std::string line;
+    if (!std::getline(in, line) || !line.starts_with(header_prefix)) {
+        return false;
+    }
+
+    std::uint64_t rows = 0;
+    while (std::getline(in, line)) {
+        if (!line.empty()) {
+            ++rows;
+        }
+    }
+    return rows == expected_rows;
+}
+
 fs::path exe_name(const std::string& base) {
 #ifdef _WIN32
     return fs::path(base + ".exe");
@@ -257,7 +273,11 @@ int main(int argc, char** argv) {
     const auto sender_exe = exe_name("sender");
 
     std::cout << "starting receiver: " << receiver_exe.string() << '\n';
-    auto receiver = start_process(receiver_exe, {std::to_string(port), std::to_string(frames), "0.0.0.0"}, "logs/receiver-stdout.txt", "logs/receiver-stderr.txt");
+    auto receiver = start_process(
+        receiver_exe,
+        {std::to_string(port), std::to_string(frames), "0.0.0.0", "--timing-log", "logs/receiver-timing.csv"},
+        "logs/receiver-stdout.txt",
+        "logs/receiver-stderr.txt");
     if (
 #ifdef _WIN32
         receiver.info.hProcess == nullptr
@@ -271,7 +291,11 @@ int main(int argc, char** argv) {
 
     std::this_thread::sleep_for(std::chrono::seconds(1));
     std::cout << "starting sender: " << sender_exe.string() << '\n';
-    auto sender = start_process(sender_exe, {"127.0.0.1", std::to_string(port), std::to_string(frames)}, "logs/sender-stdout.txt", "logs/sender-stderr.txt");
+    auto sender = start_process(
+        sender_exe,
+        {"127.0.0.1", std::to_string(port), std::to_string(frames), "--timing-log", "logs/sender-timing.csv"},
+        "logs/sender-stdout.txt",
+        "logs/sender-stderr.txt");
     if (
 #ifdef _WIN32
         sender.info.hProcess == nullptr
@@ -301,6 +325,8 @@ int main(int argc, char** argv) {
 
     const auto sender_metrics = fs::exists("logs/sender-metrics.csv") && metrics_contains_frame_count("logs/sender-metrics.csv", frames);
     const auto receiver_metrics = fs::exists("logs/receiver-metrics.csv") && metrics_contains_frame_count("logs/receiver-metrics.csv", frames);
+    const auto sender_timing = csv_has_header_and_rows("logs/sender-timing.csv", "frame_id,scheduled_steady_ns,", frames);
+    const auto receiver_timing = csv_has_header_and_rows("logs/receiver-timing.csv", "frame_id,wire_complete_steady_ns,", frames);
     const auto captured_frames = count_index_rows("captures/meta");
     const auto raw_bytes = total_segment_bytes("captures/raw");
 
@@ -310,10 +336,12 @@ int main(int argc, char** argv) {
     std::cout << "raw_bytes=" << raw_bytes << '\n';
     std::cout << "sender_metrics=" << (sender_metrics ? "yes" : "no") << '\n';
     std::cout << "receiver_metrics=" << (receiver_metrics ? "yes" : "no") << '\n';
+    std::cout << "sender_timing=" << (sender_timing ? "yes" : "no") << '\n';
+    std::cout << "receiver_timing=" << (receiver_timing ? "yes" : "no") << '\n';
     std::cout << "--- sender stdout ---\n" << sender_stdout;
     std::cout << "--- receiver stdout ---\n" << receiver_stdout;
 
-    const bool ok = sender.exit_code == 0 && receiver.exit_code == 0 && captured_frames == frames && raw_bytes == frames * kPayloadBytes && sender_metrics && receiver_metrics && contains(sender_stdout, "sender sent ") && contains(receiver_stdout, "receiver received ");
+    const bool ok = sender.exit_code == 0 && receiver.exit_code == 0 && captured_frames == frames && raw_bytes == frames * kPayloadBytes && sender_metrics && receiver_metrics && sender_timing && receiver_timing && contains(sender_stdout, "sender sent ") && contains(receiver_stdout, "receiver received ");
     if (!ok) {
         std::cerr << "local_process_smoke failed\n";
         return 1;

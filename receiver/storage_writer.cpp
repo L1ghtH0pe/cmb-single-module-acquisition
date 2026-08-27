@@ -18,6 +18,10 @@ std::string segment_name(std::uint64_t segment_id, const char* extension) {
 StorageWriter::StorageWriter(std::filesystem::path root, std::size_t frames_per_segment)
     : root_(std::move(root)), meta_root_(root_.parent_path() / "meta"), frames_per_segment_(frames_per_segment) {}
 
+StorageWriter::~StorageWriter() {
+    flush();
+}
+
 bool StorageWriter::open_segment(std::uint64_t frame_id) {
     const auto segment_id = frame_id / frames_per_segment_;
     if (segment_id == current_segment_ && data_ && index_) {
@@ -62,8 +66,6 @@ bool StorageWriter::write(const cmb::proto::Frame& frame) {
     }
 
     index_ << frame.header.frame_id << ',' << frame.header.timestamp_ns << ',' << byte_offset_ << ',' << payload_bytes << '\n';
-    data_.flush();
-    index_.flush();
     if (!index_ || !data_) {
         return false;
     }
@@ -71,6 +73,16 @@ bool StorageWriter::write(const cmb::proto::Frame& frame) {
     byte_offset_ += payload_bytes;
     ++frames_in_segment_;
     return true;
+}
+
+bool StorageWriter::flush() {
+    if (data_) {
+        data_.flush();
+    }
+    if (index_) {
+        index_.flush();
+    }
+    return (!data_.is_open() || static_cast<bool>(data_)) && (!index_.is_open() || static_cast<bool>(index_));
 }
 
 }  // namespace cmb::receiver

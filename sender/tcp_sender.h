@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -24,6 +25,7 @@ class TcpSender {
     TcpSender& operator=(const TcpSender&) = delete;
 
     bool connect_to(const std::string& host, std::uint16_t port);
+    bool send(std::span<const std::byte> bytes);
     bool send(const std::vector<std::byte>& bytes);
     void close();
 

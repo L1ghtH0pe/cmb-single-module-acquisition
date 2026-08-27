@@ -14,6 +14,9 @@ inline constexpr std::uint16_t kChannelCount = 1704;
 inline constexpr std::uint16_t kSampleRateHz = 200;
 inline constexpr std::size_t kPayloadBytes = kChannelCount * sizeof(std::uint32_t);
 inline constexpr std::size_t kHeaderSize = 40;
+inline constexpr std::size_t kFramePrefixSize = sizeof(std::uint32_t);
+inline constexpr std::size_t kFrameCrcSize = sizeof(std::uint32_t);
+inline constexpr std::size_t kWireFrameSize = kFramePrefixSize + kHeaderSize + kPayloadBytes + kFrameCrcSize;
 
 struct FrameHeader {
     std::uint32_t magic{kFrameMagic};
@@ -39,7 +42,9 @@ std::uint32_t crc32(std::span<const std::byte> bytes);
 std::uint32_t crc32(std::span<const std::uint32_t> values);
 
 std::vector<std::byte> serialize_frame(const Frame& frame);
+void serialize_frame_into(const Frame& frame, std::vector<std::byte>& out);
 Frame deserialize_frame(std::span<const std::byte> bytes);
+void deserialize_frame_into(std::span<const std::byte> bytes, Frame& out);
 std::string validate_frame(const Frame& frame);
 
 }  // namespace cmb::proto

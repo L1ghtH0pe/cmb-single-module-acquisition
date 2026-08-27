@@ -1,43 +1,45 @@
 #include "common/latency_stats.h"
 
-#include <numeric>
-#include <stdexcept>
+#include <algorithm>
+#include <limits>
 
 namespace cmb::common {
 
 void LatencyStats::add(std::uint64_t value_us) {
-    samples_.push_back(value_us);
-}
-
-std::uint64_t LatencyStats::max() const {
-    if (samples_.empty()) {
-        return 0;
+    const auto bucket = std::min<std::uint64_t>(value_us, kExactRangeUs);
+    ++buckets_[bucket];
+    ++count_;
+    total_ += value_us;
+    if (count_ == 1) {
+        min_ = value_us;
+        max_ = value_us;
+        return;
     }
-    return *std::max_element(samples_.begin(), samples_.end());
+    min_ = std::min(min_, value_us);
+    max_ = std::max(max_, value_us);
 }
 
 std::uint64_t LatencyStats::average() const {
-    if (samples_.empty()) {
-        return 0;
-    }
-    const auto total = std::accumulate(samples_.begin(), samples_.end(), std::uint64_t{0});
-    return total / samples_.size();
+    return count_ == 0 ? 0 : total_ / count_;
 }
 
 std::uint64_t LatencyStats::percentile(double p) const {
-    if (samples_.empty()) {
-        return 0;
-    }
-    if (p <= 0.0) {
-        return *std::min_element(samples_.begin(), samples_.end());
+    if (count_ == 0 || p <= 0.0) {
+        return count_ == 0 ? 0 : min_;
     }
     if (p >= 1.0) {
-        return max();
+        return max_;
     }
-    auto sorted = samples_;
-    std::sort(sorted.begin(), sorted.end());
-    const auto index = static_cast<std::size_t>((sorted.size() - 1) * p + 0.5);
-    return sorted[index];
+
+    const auto rank = static_cast<std::uint64_t>((count_ - 1) * p + 0.5);
+    std::uint64_t cumulative = 0;
+    for (std::size_t bucket = 0; bucket < buckets_.size(); ++bucket) {
+        cumulative += buckets_[bucket];
+        if (cumulative > rank) {
+            return bucket == kExactRangeUs ? max_ : bucket;
+        }
+    }
+    return max_;
 }
 
 }  // namespace cmb::common

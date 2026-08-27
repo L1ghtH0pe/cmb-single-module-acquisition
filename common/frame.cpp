@@ -77,6 +77,12 @@ FrameHeader decode_header(std::span<const std::byte> bytes) {
 }  // namespace
 
 std::vector<std::byte> serialize_frame(const Frame& frame) {
+    std::vector<std::byte> result;
+    serialize_frame_into(frame, result);
+    return result;
+}
+
+void serialize_frame_into(const Frame& frame, std::vector<std::byte>& result) {
     FrameHeader header = frame.header;
     header.payload_len = static_cast<std::uint32_t>(frame.payload.size() * sizeof(std::uint32_t));
     header.header_crc = 0;
@@ -87,8 +93,8 @@ std::vector<std::byte> serialize_frame(const Frame& frame) {
 
     const std::uint32_t payload_crc_value = crc32(std::span<const std::uint32_t>(frame.payload.data(), frame.payload.size()));
 
-    std::vector<std::byte> result;
-    result.reserve(sizeof(std::uint32_t) + header_bytes.size() + header.payload_len + sizeof(std::uint32_t));
+    result.clear();
+    result.reserve(kFramePrefixSize + header_bytes.size() + header.payload_len + kFrameCrcSize);
 
     const std::uint32_t header_len = static_cast<std::uint32_t>(header_bytes.size());
     put_le(result, header_len);
@@ -99,12 +105,16 @@ std::vector<std::byte> serialize_frame(const Frame& frame) {
     }
 
     put_le(result, payload_crc_value);
-
-    return result;
 }
 
 Frame deserialize_frame(std::span<const std::byte> bytes) {
-    if (bytes.size() < sizeof(std::uint32_t) + kHeaderSize + sizeof(std::uint32_t)) {
+    Frame frame;
+    deserialize_frame_into(bytes, frame);
+    return frame;
+}
+
+void deserialize_frame_into(std::span<const std::byte> bytes, Frame& frame) {
+    if (bytes.size() < kFramePrefixSize + kHeaderSize + kFrameCrcSize) {
         throw std::runtime_error("frame too short");
     }
 
@@ -114,8 +124,7 @@ Frame deserialize_frame(std::span<const std::byte> bytes) {
         throw std::runtime_error("unexpected header length");
     }
 
-    const auto header_span = bytes.subspan(sizeof(header_len), header_len);
-    Frame frame;
+    const auto header_span = bytes.subspan(kFramePrefixSize, header_len);
     frame.header = decode_header(header_span);
 
     if (frame.header.payload_len % sizeof(std::uint32_t) != 0) {
@@ -125,7 +134,7 @@ Frame deserialize_frame(std::span<const std::byte> bytes) {
         throw std::runtime_error("unexpected payload length");
     }
 
-    const auto expected_size = sizeof(header_len) + header_len + frame.header.payload_len + sizeof(std::uint32_t);
+    const auto expected_size = kFramePrefixSize + header_len + frame.header.payload_len + kFrameCrcSize;
     if (bytes.size() != expected_size) {
         throw std::runtime_error("frame length mismatch");
     }
@@ -133,14 +142,12 @@ Frame deserialize_frame(std::span<const std::byte> bytes) {
     const std::size_t payload_count = frame.header.payload_len / sizeof(std::uint32_t);
     frame.payload.resize(payload_count);
 
-    const auto payload_offset = sizeof(header_len) + header_len;
+    const auto payload_offset = kFramePrefixSize + header_len;
     std::size_t payload_cursor = payload_offset;
     for (auto& sample : frame.payload) {
         sample = get_le<std::uint32_t>(bytes, payload_cursor);
     }
     frame.payload_crc = get_le<std::uint32_t>(bytes, payload_cursor);
-
-    return frame;
 }
 
 std::string validate_frame(const Frame& frame) {

@@ -109,15 +109,14 @@ bool TcpReceiver::accept_one() {
     return client_socket_ != kInvalidSocket;
 }
 
-bool TcpReceiver::receive_exact(std::vector<std::byte>& out, std::size_t byte_count) {
+bool TcpReceiver::receive_exact(std::span<std::byte> out) {
     if (client_socket_ == kInvalidSocket) {
         return false;
     }
 
-    out.resize(byte_count);
     std::size_t received = 0;
-    while (received < byte_count) {
-        const auto remaining = byte_count - received;
+    while (received < out.size()) {
+        const auto remaining = out.size() - received;
         const int chunk = static_cast<int>(std::min<std::size_t>(remaining, 64 * 1024));
         const int rc = ::recv(static_cast<NativeSocket>(client_socket_), reinterpret_cast<char*>(out.data() + received), chunk, 0);
         if (rc <= 0) {
@@ -127,6 +126,11 @@ bool TcpReceiver::receive_exact(std::vector<std::byte>& out, std::size_t byte_co
     }
 
     return true;
+}
+
+bool TcpReceiver::receive_exact(std::vector<std::byte>& out, std::size_t byte_count) {
+    out.resize(byte_count);
+    return receive_exact(std::span<std::byte>(out));
 }
 
 void TcpReceiver::close() {

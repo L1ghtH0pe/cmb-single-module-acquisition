@@ -48,6 +48,7 @@ void test_segmented_storage() {
         assert(writer.write(make_frame(0)));
         assert(writer.write(make_frame(1)));
         assert(writer.write(make_frame(2)));
+        assert(writer.flush());
 
         assert(fs::file_size(root / "segment-000000.bin") == 2 * cmb::proto::kPayloadBytes);
         assert(fs::file_size(root / "segment-000001.bin") == cmb::proto::kPayloadBytes);

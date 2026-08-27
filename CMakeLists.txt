@@ -29,12 +29,13 @@ target_link_libraries(sender PRIVATE common_lib Threads::Threads)
 
 add_executable(receiver
     receiver/main.cpp
+    receiver/capture_queue.cpp
     receiver/frame_parser.cpp
     receiver/loss_detector.cpp
     receiver/tcp_receiver.cpp
     receiver/storage_writer.cpp
 )
-target_link_libraries(receiver PRIVATE common_lib)
+target_link_libraries(receiver PRIVATE common_lib Threads::Threads)
 
 if(WIN32)
     target_link_libraries(sender PRIVATE ws2_32)
@@ -88,6 +89,22 @@ if(WIN32)
 endif()
 
 enable_testing()
+
+function(enable_test_assertions target)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /UNDEBUG)
+    else()
+        target_compile_options(${target} PRIVATE -UNDEBUG)
+    endif()
+endfunction()
+
+enable_test_assertions(frame_tests)
+enable_test_assertions(stats_tests)
+enable_test_assertions(parser_tests)
+enable_test_assertions(storage_tests)
+enable_test_assertions(local_smoke_tests)
+enable_test_assertions(local_process_smoke)
+
 add_test(NAME frame_tests COMMAND frame_tests)
 add_test(NAME stats_tests COMMAND stats_tests)
 add_test(NAME parser_tests COMMAND parser_tests)

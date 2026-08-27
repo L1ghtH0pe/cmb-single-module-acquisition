@@ -391,6 +391,32 @@ bash tools/run-local-smoke.sh 9000 120000 900
 ./build/sender <上位机IP> 9000 51840000
 ```
 
+### 一键真实光纤验收
+
+确认默认的 `enp175s0f0` / `enp175s0f1` **不是当前 SSH 或管理网络接口**后，只需运行：
+
+```bash
+sudo ./tools/run-optical-loopback.sh
+```
+
+脚本会自动以 sudo 前的调用用户完成 CMake configure 和增量 build，再创建 network namespace 并运行默认的 **10 分钟 / 120000 帧**严格验收。默认同时写 sender 和 receiver 的逐帧 timing，任何一侧 deadline miss、数据不连续、CRC/解析/TCP 错误、capture 大小不符或可用网卡错误计数增量都会使测试失败。
+
+每次运行会在 `test-results/optical-*/` 下保存构建 stdout/stderr、完整命令、metrics、timing、capture、网卡前后计数以及 `summary.json`。不需要单独手工编译。
+
+需要更短的首次链路检查：
+
+```bash
+sudo ./tools/run-optical-loopback.sh --preset 1000
+```
+
+仅为了调查而允许 deadline miss：
+
+```bash
+sudo ./tools/run-optical-loopback.sh --allow-deadline-miss
+```
+
+只有确认既有二进制可用且要跳过自动编译时，才使用 `--skip-build`。
+
 ## 验收指标
 
 重点看 `logs/sender-metrics.csv` 和 `logs/receiver-metrics.csv`。
@@ -458,51 +484,45 @@ bash tools/run-local-smoke.sh 9000 120000 900
 
 ## 200 Hz 实时性测试方案
 
-第一阶段不做两机时钟同步，只用 receiver 自己的 `steady_clock` 测逐帧到达间隔。
+第一阶段不做两机时钟同步。receiver 用自己的 `steady_clock` 测量逐帧到达间隔；sender 用自己的 `steady_clock` 测量计划 tick、实际开始发送和本地 `send()` 工作耗时。两台机器的单调时钟**不能直接相减**，因此这些记录用于定位发送侧或接收侧的长尾，而不是测量端到端延迟。
 
 ### 测试目标
 
-证明 receiver 能否稳定以 200 Hz 接收 frame，也就是每帧约 5000 us 一次。
+证明 sender 能按 200 Hz / 5 ms 节奏提交数据给本机 TCP 栈，receiver 能稳定以相同节奏完成整帧接收。
 
-### 测试方法
+### 可选逐帧诊断
 
-receiver 启动后会写两个文件：
+默认运行只写聚合 metrics，避免逐帧 CSV I/O 本身引入额外抖动。需要定位长尾时，显式启用：
 
-- `logs/receiver-metrics.csv`
-- `logs/receiver-timing.csv`
+```bash
+./build/receiver 9000 1000 0.0.0.0 --timing-log logs/receiver-timing.csv
+./build/sender <上位机IP> 9000 1000 --timing-log logs/sender-timing.csv
+```
 
-其中 `receiver-timing.csv` 每帧一行，包含：
+`sender-timing.csv` 每帧一行，包含：
 
-- `frame_id`
-- `recv_done_steady_ns`
-- `recv_gap_us`
-- `deadline_us`
-- `late_us`
-- `deadline_miss`
+- `frame_id`：可与 receiver 同帧记录对齐
+- `scheduled_steady_ns`、`send_start_steady_ns`、`send_end_steady_ns`
+- `schedule_late_us`：实际开始发送晚于计划 tick 的时间
+- `work_us`：填充、编码和 socket 发送的总耗时
+- `encode_us`、`socket_send_us`：总耗时的拆分
+- `deadline_us`、`deadline_miss`
 
-第一版判据：
+sender 默认 deadline 为 5500 us，可通过 `--deadline-us <微秒>` 调整实验阈值。`send_end_steady_ns` 仅代表 `send()` 成功返回、数据交给 sender 本机内核，并不代表数据已在线缆上发出。
+
+`receiver-timing.csv` 每帧一行，记录 `frame_id`、wire-complete 时刻、到达间隔、deadline、迟到、解析耗时和 capture 队列深度。对某个异常 `frame_id`，先检查 sender 的 `schedule_late_us` 和 `socket_send_us`：前者异常通常指向 sender 调度问题，后者异常通常指向 TCP 反压或本机网络路径；若二者正常而 receiver 到达间隔异常，再重点检查 receiver、内核或链路路径。
+
+### 判据
 
 - 目标周期：5000 us
-- 接收 deadline：5500 us
+- sender 与 receiver 默认 deadline：5500 us
 - `frame_id` 连续
 - `parse_fail_count = 0`
 - `crc_error_count = 0`
 - `tcp_disconnect_count = 0`
-- `recv_deadline_miss_count = 0`
+- 严格实时验收时：`send_deadline_miss_count = 0` 且 `recv_deadline_miss_count = 0`
 
-### 结论怎么判
-
-如果所有帧都满足：
-
-- `recv_gap_us <= 5500`
-- 没有 frame gap
-- 没有 CRC 错误
-- 没有解析失败
-- 没有 TCP 断连
-
-就可以认为这条光纤链路满足当前版本的 200 Hz 实时到达要求。
-
-如果后面要测单帧端到端延迟，再做 PTP + 硬件时间戳，不和这一步混在一起。
+如果后续要测单帧端到端延迟，再加入 PTP 与硬件时间戳，不和这一阶段的单机单调时钟诊断混在一起。
 
 ## 当前未决项
 

@@ -12,7 +12,13 @@ namespace cmb::receiver {
 class StorageWriter {
   public:
     explicit StorageWriter(std::filesystem::path root, std::size_t frames_per_segment = 10000);
+    ~StorageWriter();
+
+    StorageWriter(const StorageWriter&) = delete;
+    StorageWriter& operator=(const StorageWriter&) = delete;
+
     bool write(const cmb::proto::Frame& frame);
+    bool flush();
 
   private:
     bool open_segment(std::uint64_t frame_id);

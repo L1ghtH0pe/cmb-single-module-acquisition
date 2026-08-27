@@ -4,6 +4,9 @@ logs/
 captures/raw/
 captures/meta/
 storage_writer_test/
+test-results/
+__pycache__/
+*.py[cod]
 *.exe
 *.obj
 *.o

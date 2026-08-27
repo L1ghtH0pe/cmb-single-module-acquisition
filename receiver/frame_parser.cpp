@@ -30,18 +30,26 @@ ParseError classify_validation_error(const std::string& error) {
 }  // namespace
 
 ParseResult parse_frame(const std::vector<std::byte>& bytes) {
+    cmb::proto::Frame frame;
+    std::string message;
+    const auto error = parse_frame_into(bytes, frame, message);
+    if (error != ParseError::kNone) {
+        return {.frame = std::nullopt, .error = error, .message = std::move(message)};
+    }
+    return {.frame = std::move(frame), .error = ParseError::kNone, .message = {}};
+}
+
+ParseError parse_frame_into(std::span<const std::byte> bytes, cmb::proto::Frame& frame, std::string& message) {
     try {
-        auto frame = cmb::proto::deserialize_frame(bytes);
-        const auto validation_error = cmb::proto::validate_frame(frame);
-        const auto parse_error = classify_validation_error(validation_error);
-        if (parse_error != ParseError::kNone) {
-            return {.frame = std::nullopt, .error = parse_error, .message = validation_error};
-        }
-        return {.frame = frame, .error = ParseError::kNone, .message = {}};
+        cmb::proto::deserialize_frame_into(bytes, frame);
+        message = cmb::proto::validate_frame(frame);
+        return classify_validation_error(message);
     } catch (const std::exception& ex) {
-        return {.frame = std::nullopt, .error = ParseError::kMalformed, .message = ex.what()};
+        message = ex.what();
+        return ParseError::kMalformed;
     } catch (...) {
-        return {.frame = std::nullopt, .error = ParseError::kMalformed, .message = "unknown parse failure"};
+        message = "unknown parse failure";
+        return ParseError::kMalformed;
     }
 }
 

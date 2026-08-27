@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -26,6 +27,7 @@ struct ParseResult {
 };
 
 ParseResult parse_frame(const std::vector<std::byte>& bytes);
+ParseError parse_frame_into(std::span<const std::byte> bytes, cmb::proto::Frame& frame, std::string& message);
 ParseResult parse_prefixed_frame(const std::vector<std::byte>& header_and_payload);
 std::uint32_t peek_header_len(const std::vector<std::byte>& prefix);
 std::uint32_t peek_payload_len(const std::vector<std::byte>& header_bytes);

@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -25,6 +26,7 @@ class TcpReceiver {
 
     bool listen_on(std::uint16_t port, const std::string& bind_host = "0.0.0.0");
     bool accept_one();
+    bool receive_exact(std::span<std::byte> out);
     bool receive_exact(std::vector<std::byte>& out, std::size_t byte_count);
     void close();
 
