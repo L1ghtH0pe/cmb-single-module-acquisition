@@ -36,6 +36,8 @@ struct Options {
     std::uint16_t port{9000};
     std::uint64_t expected_frames{1000};
     std::string bind_host{"0.0.0.0"};
+    std::uint16_t expected_module_id{0};
+    bool validate_module_id{false};
     std::filesystem::path timing_log{};
     std::size_t capture_queue_frames{kDefaultCaptureQueueFrames};
 };
@@ -72,9 +74,17 @@ std::size_t parse_queue_frames(const char* text) {
     return static_cast<std::size_t>(value);
 }
 
+std::uint16_t parse_module_id(const char* text) {
+    const unsigned long value = std::stoul(text);
+    if (value > std::numeric_limits<std::uint16_t>::max()) {
+        throw std::out_of_range("module_id must be in 0..65535");
+    }
+    return static_cast<std::uint16_t>(value);
+}
+
 void print_usage() {
     std::cerr << "usage: receiver [port] [expected_frame_count] [bind_host]"
-                 " [--timing-log <path>] [--capture-queue-frames <count>]\n";
+                 " [--module-id <id>] [--timing-log <path>] [--capture-queue-frames <count>]\n";
 }
 
 Options parse_options(int argc, char** argv) {
@@ -82,7 +92,13 @@ Options parse_options(int argc, char** argv) {
     int positional_index = 0;
     for (int index = 1; index < argc; ++index) {
         const std::string argument = argv[index];
-        if (argument == "--timing-log") {
+        if (argument == "--module-id") {
+            if (++index == argc) {
+                throw std::invalid_argument("--module-id requires a value");
+            }
+            options.expected_module_id = parse_module_id(argv[index]);
+            options.validate_module_id = true;
+        } else if (argument == "--timing-log") {
             if (++index == argc) {
                 throw std::invalid_argument("--timing-log requires a path");
             }
@@ -145,7 +161,7 @@ int main(int argc, char** argv) {
     }
 
     logger.log(cmb::common::LogLevel::kInfo, "listening on " + options.bind_host + ":" + std::to_string(options.port));
-    std::cout << "receiver listening on " << options.bind_host << ':' << options.port << "\n";
+    std::cout << "receiver listening on " << options.bind_host << ':' << options.port << std::endl;
 
     if (!receiver.accept_one()) {
         logger.log(cmb::common::LogLevel::kError, "failed to accept client");
@@ -262,6 +278,14 @@ int main(int argc, char** argv) {
             }
             logger.log(cmb::common::LogLevel::kError, "parse failed: " + parse_message);
             exit_code = 4;
+            break;
+        }
+        if (options.validate_module_id && captured.frame.header.module_id != options.expected_module_id) {
+            ++snapshot.parse_fail_count;
+            logger.log(cmb::common::LogLevel::kError,
+                       "unexpected module_id: " + std::to_string(captured.frame.header.module_id) +
+                           ", expected " + std::to_string(options.expected_module_id));
+            exit_code = 5;
             break;
         }
 

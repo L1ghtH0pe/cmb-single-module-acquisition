@@ -1,104 +1,185 @@
-# CMB 单模块高速并行数据获取原型
+# CMB 高速并行数据获取原型
 
-这是一个单模块高速并行数据获取原型，用来验证一条最小链路：
+用于验证 CMB 探测器数据采集链路的实验性原型。核心链路支持单模块运行，并提供十模块 localhost 软件模型，在接入真实十路光纤/网卡前验证并发进程、模块身份、帧号连续性和分路落盘。
 
 ```text
-下位机 x86(sender) → TCP/以太网/光纤链路 → 上位机服务器(receiver)
+sender（模拟下位机） → TCP / 以太网 / 光纤链路 → receiver（上位机）
 ```
 
-当前目标不是最终量产系统，而是先证明单模块在 **200 Hz / 5 ms 周期**下可以稳定完成：数据生成、组帧、网络传输、接收解析、CRC 校验、连续性检查、日志统计和最小落盘。
+> **定位**：验证原型，不是量产系统。sender 目前生成模拟数据；真实探测器接口、十路物理拓扑、PTP/硬件时间戳、故障切换和长期运行策略尚未完成。
+
+## 当前实现
+
+### 数据面与协议
+
+- C++20 `sender` 和 `receiver` 可执行程序。
+- TCP 长连接承载应用层 frame；TCP 本身只提供字节流。
+- 协议版本为 v1，所有线上整数均按 little-endian 编码。
+- 每帧包含 1704 个 `uint32_t` 采样值，即 6816 bytes payload。
+- sender 默认以 200 Hz（5 ms）周期生成模拟数据，每路 `frame_id` 从 0 递增。
+- receiver 检查 magic、版本、长度、header CRC、payload CRC 和 frame 合法性。
+
+## 数据格式
+
+### TCP 线上帧
+
+每个 TCP 应用层帧固定为 **6864 bytes**：
+
+```text
+┌────────────────────┬─────────────────┬──────────────────────┬─────────────────────┐
+│ header_len (4 B)   │ header (40 B)   │ payload (6816 B)     │ payload_crc (4 B)   │
+└────────────────────┴─────────────────┴──────────────────────┴─────────────────────┘
+wire offset: 0        4                 44                     6860                6864
+```
+
+TCP 不保留消息边界。receiver 必须先读取 4-byte `header_len`，再读取 header，并根据 header 中的 `payload_len` 收齐 payload 和末尾 CRC；不能假定一次 `recv()` 对应一帧。
+
+#### 帧头字段
+
+`header_len` 当前固定为 40。紧随其后的 40-byte header 布局如下；“帧内偏移”从 `header_len` 的第一个字节开始计算：
+
+| 帧内偏移 | header 内偏移 | 长度 | 类型 | 字段 | v1 含义/固定值 |
+|---:|---:|---:|---|---|---|
+| 0 | — | 4 | `uint32_le` | `header_len` | `40` |
+| 4 | 0 | 4 | `uint32_le` | `magic` | `0x434D4231`（CMB1） |
+| 8 | 4 | 2 | `uint16_le` | `version` | `1` |
+| 10 | 6 | 2 | `uint16_le` | `header_size` | `40` |
+| 12 | 8 | 2 | `uint16_le` | `module_id` | 模块编号，范围 `0..65535` |
+| 14 | 10 | 2 | `uint16_le` | `flags` | 当前固定为 `0`，预留 |
+| 16 | 12 | 8 | `uint64_le` | `frame_id` | 每个 sender 从 `0` 连续递增 |
+| 24 | 20 | 8 | `uint64_le` | `timestamp_ns` | sender 的单调时钟时间戳，单位 ns |
+| 32 | 28 | 2 | `uint16_le` | `channel_count` | `1704` |
+| 34 | 30 | 2 | `uint16_le` | `sample_rate_hz` | `200` |
+| 36 | 32 | 4 | `uint32_le` | `payload_len` | `6816` |
+| 40 | 36 | 4 | `uint32_le` | `header_crc` | header CRC-32 |
+| 44 | — | 6816 | `1704 × uint32_le` | `payload` | 通道 0～1703 的采样值 |
+| 6860 | — | 4 | `uint32_le` | `payload_crc` | payload CRC-32 |
+
+`timestamp_ns` 来自 `std::chrono::steady_clock`，只适合计算同一运行环境内的时间间隔；它不是 UTC/Unix 时间，也不能直接用于跨主机时钟对齐。
+
+#### Payload 通道顺序与模拟值
+
+payload 中第 `i` 个 32-bit 值对应通道 `i`，其中 `0 <= i < 1704`，不存在通道间 padding。当前模拟 sender 生成：
+
+```text
+payload[i] = uint32(frame_id + i)
+```
+
+例如 `frame_id = 42` 时，前 4 个通道值为 `42, 43, 44, 45`。接入真实探测器后，应保持 1704 通道的顺序和 `uint32_le` 线格式，或通过升级协议版本明确变更。
+
+#### CRC-32
+
+header 和 payload 都使用 reflected CRC-32：多项式 `0xEDB88320`、初值 `0xFFFFFFFF`、结果按位取反。
+
+- `header_crc`：先将 header 中的 `header_crc` 字段置 0，再对完整 40-byte header 计算。
+- `payload_crc`：对线上 6816-byte payload 计算。
+- 当前开发与验收目标为 x86 little-endian 主机；若移植到 big-endian 平台，应补充 payload CRC 和落盘字节序测试。
+
+#### 带宽
+
+单路 200 Hz 时：
+
+- payload：`6816 × 200 = 1,363,200 bytes/s`。
+- 完整线上帧：`6864 × 200 = 1,372,800 bytes/s`，不含 TCP/IP/以太网开销。
+- 十路完整帧合计约 `13,728,000 bytes/s`，不含协议栈开销。
+
+### Receiver 落盘格式
+
+receiver 校验通过后只落盘 payload，不把 4-byte prefix、40-byte header 或两个 CRC 写入 `.bin`。默认每 10000 帧形成一个分段：
+
+```text
+captures/
+├── raw/segment-000000.bin
+└── meta/segment-000000.csv
+```
+
+`segment-XXXXXX.bin` 是连续 payload 字节：
+
+```text
+[frame 0: 6816 B][frame 1: 6816 B]...[frame N: 6816 B]
+```
+
+对应 CSV 首行为：
+
+```csv
+frame_id,timestamp_ns,offset,payload_bytes
+```
+
+每行记录该帧在当前 `.bin` 分段内的字节偏移和长度。例如：
+
+```csv
+frame_id,timestamp_ns,offset,payload_bytes
+0,123456789,0,6816
+1,128456789,6816,6816
+```
+
+读取第 `n` 行时，从对应 `.bin` 的 `offset` 位置读取 `payload_bytes`，再按 1704 个 `uint32_le` 解码。当前 x86 目标上的落盘字节与线上 payload 字节序一致；`.bin` 本身不含文件头，因此必须与同名 CSV 索引配套使用。
+
+### 诊断与落盘
+
+- sender/receiver 输出 runtime log 和聚合 metrics CSV。
+- sender 记录周期、调度迟到、deadline miss、编码和 socket 发送耗时。
+- receiver 记录接收间隔、deadline miss、解析耗时、队列水位、队列溢出和写盘耗时。
+- receiver 检测 frame_id 缺帧、重复和乱序；指定 `--module-id` 后还会校验模块身份。
+- receiver 使用有界 capture queue 和分段文件落盘：
+  - `captures/raw/segment-XXXXXX.bin`：连续 payload 二进制。
+  - `captures/meta/segment-XXXXXX.csv`：frame_id、timestamp、偏移和长度索引。
+- `--timing-log` 可选开启逐帧 timing CSV；默认只写聚合 metrics，避免诊断 I/O 影响周期。
+
+### 测试能力
+
+- CTest：frame、统计、解析、存储和跨平台进程 smoke 测试。
+- Python 单路 smoke：检查进程、frame 数、capture 大小、索引和 metrics。
+- Linux 光口 loopback runner：可创建 network namespace，记录 NIC counters，并输出 `summary.json`。
+- 十路 localhost runner：读取十路 module/端口映射，启动十组独立 sender/receiver，并按模块保存日志、metrics 和 capture。
 
 ## 当前状态
 
-已完成：
+截至 **2026-08-31**，代码已具备单模块 TCP 采集、CRC/解析/连续性检查、指标记录、分段落盘、单机回归、Linux 光口脚本和十路 localhost 软件验证。
 
-- `sender`：下位机程序，按 5 ms 周期生成并发送模拟探测器数据
-- `receiver`：上位机程序，监听 TCP 端口、接收 frame、校验 CRC、检查 `frame_id`、写日志和原始数据
-- TCP framing：`[header_len][header][payload][payload_crc]`
-- payload：`1704 × 32-bit = 6816 bytes/frame`
-- 本地 smoke test：可在一台机器上同时启动 sender 和 receiver
-- Windows/MSYS2 本地 10 分钟 smoke 已通过
+已记录的历史结果：
 
-未完成验收：
+- Windows/MSYS2 本地 10 分钟 smoke 已通过。
+- 单路真实双光口 200 Hz / 10 分钟验收已记录：120000 帧完整，连续性、CRC、解析、TCP/NIC 错误正常，sender/receiver deadline miss 为 0。
 
-- 真实上位机服务器环境确认
-- 下位机 x86 到上位机服务器的双机部署验证
-- 真实网卡、光模块、光纤、交换机或光电转换器链路验证
-- 24 小时 / 72 小时长稳测试
-- 真实探测器前端接入
-- CPU / 内存真实采样，目前 metrics 字段可写但不是完整资源监控
+这些是历史测试记录，不代表当前机器或未来硬件环境自动满足相同结果。以下内容仍未正式实现或验收：
 
-上位机操作系统目前**待确认**。不要把它默认写成某个具体发行版。若最终确认为 Linux，优先用原生 Linux 做链路、周期和长稳验收。
+- 真实十路物理链路的一键 supervisor、启动同步和统一报告。
+- 配置文件中的网卡、IP、namespace 字段自动配置；当前十路 localhost runner 实际使用 `127.0.0.1` 和独立端口，其余字段是现场部署元数据。
+- PTP、硬件时间戳和正式端到端延迟阈值。
+- 真实探测器前端数据源、生产级恢复/重连、权限隔离和 24/72 小时最终验收。
 
-## 项目结构
+## 快速开始
 
-```text
-common/                 公共协议、CRC、日志、metrics、延迟统计
-sender/                 下位机发送端
-receiver/               上位机接收端
-tests/                  单元测试和本地集成测试
-tools/run_local_smoke.py 本机 sender/receiver smoke test 主脚本
-tools/run-local-smoke.sh Linux shell 包装脚本
-tools/run-local-smoke.ps1 PowerShell 包装脚本
-tools/run_local_smoke.cmd Windows cmd 包装脚本
-```
+### 构建与测试
 
-运行时会生成：
-
-```text
-logs/
-captures/raw/segment-*.bin
-captures/meta/segment-*.csv
-```
-
-这些是本地运行产物，已在 `.gitignore` 中忽略。需要清理时可以删除：
-
-```bash
-rm -rf build logs captures
-```
-
-## 构建
-
-### Windows / MSYS2 UCRT64
-
-```bash
-PATH="/c/msys64/ucrt64/bin:$PATH" cmake -S . -B build -G Ninja
-PATH="/c/msys64/ucrt64/bin:$PATH" cmake --build build
-PATH="/c/msys64/ucrt64/bin:$PATH" ctest --test-dir build --output-on-failure
-```
-
-### Linux
-
-先安装基础工具。不同发行版包管理命令不同，但至少需要：
-
-- C++ 编译器
-- CMake
-- Python 3
-- Git
-- 网络诊断工具：`iproute2` / `iproute`、`ethtool`、`iperf3`
-- 可选：Ninja
-
-构建：
-
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build
-ctest --test-dir build --output-on-failure
-```
-
-如果已安装 Ninja，也可以用：
+需要 CMake 3.20+、C++20 编译器、Python 3；Linux 光口测试另外需要 `iproute2`、`ethtool` 和 root 权限。使用 Ninja 时：
 
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build
+cmake --build build -j2
 ctest --test-dir build --output-on-failure
 ```
 
-## 本机 smoke test
+不使用 Ninja 时可省略 `-G Ninja`。CMake targets：
 
-Windows / MSYS2：
+```text
+sender  receiver
+frame_tests  stats_tests  parser_tests  storage_tests
+local_smoke_tests  local_process_smoke
+```
+
+### 单路 localhost smoke
+
+Linux：
 
 ```bash
+./tools/run-local-smoke.sh 9000 1000 90
+```
+
+Windows/MSYS2 cmd：
+
+```bat
 tools/run_local_smoke.cmd 9000 1000 90
 ```
 
@@ -108,439 +189,179 @@ PowerShell：
 powershell -ExecutionPolicy Bypass -File tools/run-local-smoke.ps1 -Port 9000 -Frames 1000 -Timeout 90
 ```
 
-Linux：
+10 分钟模型测试为 120000 帧：
 
 ```bash
-bash tools/run-local-smoke.sh 9000 1000 90
+./tools/run-local-smoke.sh 9000 120000 900
 ```
 
-10 分钟本机测试：
+runner 会清理并重建 `logs/`、`captures/raw/`、`captures/meta/`，启动 receiver/sender，并校验输出、frame 数、CRC/解析错误、capture 大小和索引连续性。
+
+### 十路 localhost smoke
 
 ```bash
-bash tools/run-local-smoke.sh 9000 120000 900
+./tools/run-multi-local-smoke.sh --frames 1000
 ```
 
-本机 smoke test 会自动：
-
-1. 清理旧 `logs/`、`captures/raw/`、`captures/meta/`
-2. 启动 `receiver`
-3. 启动 `sender`
-4. 校验发送帧数、接收帧数、CRC、解析错误、capture 文件大小和索引连续性
-
-## 双机部署
-
-### 1. 确认两台机器信息
-
-上位机服务器：
+等价命令：
 
 ```bash
-uname -m
-cat /etc/os-release
-ip addr
-ip link
+python3 tools/run_multi_local_smoke.py \
+  --config configs/ten-channel.example.conf \
+  --frames 1000 \
+  --output /tmp/cmb-ten-way-local
 ```
 
-下位机 x86：
-
-```bash
-uname -m
-cat /etc/os-release
-ip addr
-ip link
-```
-
-如果上位机是 `x86_64` Linux，直接在服务器上构建 `receiver`。如果上位机不是 x86，也不要复制下位机编译出的二进制，应在上位机本地构建，或之后再做交叉编译方案。
-
-### 2. 先测网络
-
-下位机 ping 上位机：
-
-```bash
-ping <上位机IP>
-```
-
-上位机启动 iperf3 服务端：
-
-```bash
-iperf3 -s
-```
-
-下位机测试到上位机的吞吐：
-
-```bash
-iperf3 -c <上位机IP> -t 60
-```
-
-如果有光口或光电转换器，测试前后记录网卡状态：
-
-```bash
-ethtool <网卡名>
-ethtool -S <网卡名>
-```
-
-重点看错误计数是否增长，例如 `rx_errors`、`tx_errors`、`rx_crc_errors`、`rx_dropped`、`tx_dropped`。
-
-### 3. 上位机运行 receiver
-
-```bash
-./build/receiver 9000 1000 0.0.0.0
-```
-
-参数含义：
+参数：
 
 ```text
-9000       TCP 监听端口
-1000       期望接收帧数
-0.0.0.0    监听所有网卡
+--config <path>       配置文件，默认 configs/ten-channel.example.conf
+--frames <n>          每路发送帧数，默认 1000
+--build-dir <path>   sender/receiver 所在 build 目录
+--output <path>      输出目录，默认 /tmp/cmb-ten-way-local
 ```
 
-如果可执行文件在子目录，用实际路径，例如：
-
-```bash
-./build/receiver/receiver 9000 1000 0.0.0.0
-```
-
-### 4. 下位机运行 sender
-
-```bash
-./build/sender <上位机IP> 9000 1000
-```
-
-参数含义：
+配置每行格式：
 
 ```text
-<上位机IP>  receiver 所在服务器地址
-9000        TCP 端口，必须和 receiver 一致
-1000        发送帧数
+module_id tx_iface rx_iface tx_ip rx_ip port tx_namespace rx_namespace
 ```
 
-如果可执行文件在子目录，用实际路径，例如：
+当前脚本只使用 `module_id` 和 `port`；接口、IP、namespace 字段用于记录未来真实部署映射。summary 会列出每路 exit code、发送/接收 frame 数、原始字节数、分段数量和错误项。该测试验证十路独立 TCP 会话的软件并发，不等价于真实十路光纤验收。
 
-```bash
-./build/sender/sender <上位机IP> 9000 1000
-```
-
-## 端口约定
-
-当前建议先固定使用 TCP `9000`。端口不是写死的，是启动参数。
-
-上位机监听：
-
-```bash
-./build/receiver 9000 1000 0.0.0.0
-```
-
-下位机连接同一个端口：
-
-```bash
-./build/sender <上位机IP> 9000 1000
-```
-
-检查端口是否被占用：
-
-```bash
-ss -lntp | grep 9000
-```
-
-如果上位机防火墙拦截了 9000，需要放行 TCP 9000。
-
-## 协议 v0.1
-
-每个 5 ms 周期形成一个 frame。TCP 只是承载帧流，不能裸发 payload。
-
-线格式：
+输出示例：
 
 ```text
-[header_len][header][payload][payload_crc]
+/tmp/cmb-ten-way-local/
+├── logs/                         # 每路 stdout/stderr
+├── captures/
+│   └── module-0000/
+│       ├── logs/                 # 该路 runtime/metrics/timing
+│       └── captures/             # raw/ 与 meta/
+└── summary.json
 ```
 
-header 至少表达：
+### 单路双机运行
 
-- `magic`：固定标识，用于识别帧起始
-- `version`：协议版本
-- `header_len`：header 长度
-- `frame_id`：单调递增帧号
-- `timestamp_ns`：发送端时间戳
-- `module_id`：模块编号
-- `channel_count`：当前为 1704
-- `sample_bytes`：当前为 4
-- `payload_len`：当前为 6816
-- `header_crc`：header 校验
+receiver 所在上位机：
 
-payload 当前模拟格式：
+```bash
+./build/receiver 9000 1000 0.0.0.0 --module-id 0
+```
+
+sender 所在下位机：
+
+```bash
+./build/sender <上位机IP> 9000 1000 --module-id 0
+```
+
+参数顺序为：
 
 ```text
-1704 channels × uint32 little-endian samples
+receiver: <port> <expected_frames> <bind_host>
+sender:   <host> <port> <frame_count>
 ```
 
-接收端必须检查：
-
-- `magic`
-- `version`
-- `header_len`
-- `payload_len`
-- header CRC
-- payload CRC
-- `frame_id` 连续性
-
-## 测试路线
-
-不要一上来跑 24 小时。按这个顺序推进。
-
-### 1. 本机 1000 帧
-
-```bash
-bash tools/run-local-smoke.sh 9000 1000 90
-```
-
-1000 帧约 5 秒。
-
-### 2. 本机 10 分钟
-
-```bash
-bash tools/run-local-smoke.sh 9000 120000 900
-```
-
-120000 帧约 10 分钟。
-
-### 3. 双机 1000 帧
-
-上位机：
-
-```bash
-./build/receiver 9000 1000 0.0.0.0
-```
-
-下位机：
-
-```bash
-./build/sender <上位机IP> 9000 1000
-```
-
-### 4. 双机 10 分钟
+可选参数：
 
 ```text
-10 分钟 × 60 秒 × 200 帧/秒 = 120000 帧
+--module-id <0..65535>       sender 写入模块编号；receiver 开启身份校验
+--timing-log <path>          输出逐帧 timing CSV
+--capture-queue-frames <n>   receiver capture queue 容量
+--deadline-us <n>            sender deadline 阈值
 ```
 
-上位机：
-
-```bash
-./build/receiver 9000 120000 0.0.0.0
-```
-
-下位机：
-
-```bash
-./build/sender <上位机IP> 9000 120000
-```
-
-### 5. 双机 1 小时
+两端的 `module_id` 必须一致；端口必须一致。默认输出路径相对于进程当前工作目录：
 
 ```text
-1 小时 × 3600 秒 × 200 帧/秒 = 720000 帧
+logs/sender-runtime.log       logs/receiver-runtime.log
+logs/sender-metrics.csv       logs/receiver-metrics.csv
+captures/raw/segment-*.bin    captures/meta/segment-*.csv
 ```
 
-上位机：
+## 验收指标
 
-```bash
-./build/receiver 9000 720000 0.0.0.0
-```
+至少检查：
 
-下位机：
+- sender 和 receiver frame 数相等且等于预期。
+- `frame_id_begin` / `frame_id_end` 与连续性检查一致。
+- `parse_fail_count = 0`、`crc_error_count = 0`、`tcp_disconnect_count = 0`。
+- `capture_queue_overrun_count = 0`。
+- `send_period_avg_us` 和 `recv_gap_avg_us` 接近 5000。
+- p999、max 和 deadline miss 指标有记录并可解释。
+- 真实硬件测试前后记录 `uname -a`、`lscpu`、`lspci -nn`、`ip link`、`ethtool <iface>`、`ethtool -S <iface>` 和 `journalctl -b`。
 
-```bash
-./build/sender <上位机IP> 9000 720000
-```
+## Linux 光口 loopback
 
-### 6. 双机 24 小时
-
-```text
-24 小时 × 86400 秒 × 200 帧/秒 = 17280000 帧
-```
-
-上位机：
-
-```bash
-./build/receiver 9000 17280000 0.0.0.0
-```
-
-下位机：
-
-```bash
-./build/sender <上位机IP> 9000 17280000
-```
-
-### 7. 双机 72 小时
-
-只在 24 小时通过后再跑。
-
-```text
-72 小时 × 259200 秒 × 200 帧/秒 = 51840000 帧
-```
-
-上位机：
-
-```bash
-./build/receiver 9000 51840000 0.0.0.0
-```
-
-下位机：
-
-```bash
-./build/sender <上位机IP> 9000 51840000
-```
-
-### 一键真实光纤验收
-
-确认默认的 `enp175s0f0` / `enp175s0f1` **不是当前 SSH 或管理网络接口**后，只需运行：
-
-```bash
-sudo ./tools/run-optical-loopback.sh
-```
-
-脚本会自动以 sudo 前的调用用户完成 CMake configure 和增量 build，再创建 network namespace 并运行默认的 **10 分钟 / 120000 帧**严格验收。默认同时写 sender 和 receiver 的逐帧 timing，任何一侧 deadline miss、数据不连续、CRC/解析/TCP 错误、capture 大小不符或可用网卡错误计数增量都会使测试失败。
-
-每次运行会在 `test-results/optical-*/` 下保存构建 stdout/stderr、完整命令、metrics、timing、capture、网卡前后计数以及 `summary.json`。不需要单独手工编译。
-
-需要更短的首次链路检查：
+该测试面向有两块独立网卡/光口的 Linux 主机，需要 root 权限和 `ip`、`ethtool` 等工具。确认接口归属后再运行：
 
 ```bash
 sudo ./tools/run-optical-loopback.sh --preset 1000
 ```
 
-仅为了调查而允许 deadline miss：
+常用参数：
 
-```bash
-sudo ./tools/run-optical-loopback.sh --allow-deadline-miss
+```text
+--frames <n>              指定帧数
+--preset <1000|10min>     使用预设帧数
+--tx-iface <iface>        sender 网卡
+--rx-iface <iface>        receiver 网卡
+--keep-namespaces         测试后保留 namespace 供排查
+--skip-build              跳过自动构建
+--allow-deadline-miss     调查模式，允许 deadline miss
 ```
 
-只有确认既有二进制可用且要跳过自动编译时，才使用 `--skip-build`。
-
-## 验收指标
-
-重点看 `logs/sender-metrics.csv` 和 `logs/receiver-metrics.csv`。
-
-基础合格条件：
-
-- `frame_count` 等于发送帧数
-- `frame_id_begin` / `frame_id_end` 连续
-- `parse_fail_count = 0`
-- `crc_error_count = 0`
-- `tcp_disconnect_count = 0`
-- `send_period_avg_us` 接近 5000
-- `recv_gap_avg_us` 接近 5000
-- `send_period_p999_us`、`recv_gap_p999_us`、max 长尾有记录并可解释
-
-长稳测试还要记录：
-
-- `uname -a`
-- `lscpu`
-- `lspci -nn`
-- `ip link`
-- `ethtool <iface>`
-- `ethtool -S <iface>`
-- `journalctl -b`
+默认严格模式要求 sender 和 receiver deadline miss 均为 0。脚本结束时会清理自己创建的 namespace；使用 `--keep-namespaces` 后需手工清理。
 
 ## 磁盘估算
 
-当前 payload 为 6816 bytes/frame，200 Hz 下约 1.36 MB/s。
+仅计算单路 payload（6816 bytes/frame），不含 header、索引和日志：
 
-| 时长 | 帧数 | 原始 payload 规模 |
+| 时长 | 帧数 | 单路 payload |
 |---|---:|---:|
 | 10 分钟 | 120000 | 约 818 MB |
 | 1 小时 | 720000 | 约 4.9 GB |
 | 24 小时 | 17280000 | 约 118 GB |
 | 72 小时 | 51840000 | 约 353 GB |
 
-实际还会有 header、索引和日志。建议：
+十路约为单路十倍，正式测试还需预留文件系统和故障重试空间。
 
-- 24 小时测试至少预留 200 GB
-- 72 小时测试至少预留 600 GB
+## 生成物与清理
 
-## 已有本机测试记录
+以下均为运行生成物，不应提交到 Git：
 
-2026-07-22，Windows 11 + MSYS2 UCRT64，本机 sender/receiver 双进程 smoke：
-
-| 测试 | 结果 |
-|---|---|
-| 1000 帧 | 通过，收满 1000 帧，CRC 0，parse fail 0 |
-| 10000 帧 | 通过 |
-| 120000 帧 / 10 分钟 | 通过，收满 120000 帧，CRC 0，parse fail 0，tcp disconnect 0 |
-
-10 分钟测试记录：
-
-- `sender send_period_avg_us`: 4999
-- `receiver recv_gap_avg_us`: 4999
-- `sender send_period_max_us`: 46490
-- `receiver recv_gap_max_us`: 46497
-- `sender send_period_p999_us`: 36910
-- `receiver recv_gap_p999_us`: 36900
-- raw bytes: 817,920,000
-- meta index rows: 120000
-- index contiguous: true
-
-结论：本机 happy path 已经稳定到 10 分钟，但 Windows 调度长尾明显，不能替代真实上位机服务器和真实链路验收。
-
-## 200 Hz 实时性测试方案
-
-第一阶段不做两机时钟同步。receiver 用自己的 `steady_clock` 测量逐帧到达间隔；sender 用自己的 `steady_clock` 测量计划 tick、实际开始发送和本地 `send()` 工作耗时。两台机器的单调时钟**不能直接相减**，因此这些记录用于定位发送侧或接收侧的长尾，而不是测量端到端延迟。
-
-### 测试目标
-
-证明 sender 能按 200 Hz / 5 ms 节奏提交数据给本机 TCP 栈，receiver 能稳定以相同节奏完成整帧接收。
-
-### 可选逐帧诊断
-
-默认运行只写聚合 metrics，避免逐帧 CSV I/O 本身引入额外抖动。需要定位长尾时，显式启用：
-
-```bash
-./build/receiver 9000 1000 0.0.0.0 --timing-log logs/receiver-timing.csv
-./build/sender <上位机IP> 9000 1000 --timing-log logs/sender-timing.csv
+```text
+build/ logs/ captures/ test-results/ .claude/ **/__pycache__/ *.pyc
 ```
 
-`sender-timing.csv` 每帧一行，包含：
+清理命令：
 
-- `frame_id`：可与 receiver 同帧记录对齐
-- `scheduled_steady_ns`、`send_start_steady_ns`、`send_end_steady_ns`
-- `schedule_late_us`：实际开始发送晚于计划 tick 的时间
-- `work_us`：填充、编码和 socket 发送的总耗时
-- `encode_us`、`socket_send_us`：总耗时的拆分
-- `deadline_us`、`deadline_miss`
+```bash
+rm -rf build logs captures test-results .claude tools/__pycache__
+```
 
-sender 默认 deadline 为 5500 us，可通过 `--deadline-us <微秒>` 调整实验阈值。`send_end_steady_ns` 仅代表 `send()` 成功返回、数据交给 sender 本机内核，并不代表数据已在线缆上发出。
+长时间 capture 可能占用数百 GB；测试前确认输出路径、磁盘剩余空间和保留策略。根目录参考资料不是运行生成物：
 
-`receiver-timing.csv` 每帧一行，记录 `frame_id`、wire-complete 时刻、到达间隔、deadline、迟到、解析耗时和 capture 队列深度。对某个异常 `frame_id`，先检查 sender 的 `schedule_late_us` 和 `socket_send_us`：前者异常通常指向 sender 调度问题，后者异常通常指向 TCP 反压或本机网络路径；若二者正常而 receiver 到达间隔异常，再重点检查 receiver、内核或链路路径。
+- `PREEMPT_RT实时化技术分析.md`：实时化与内核部署参考。
+- `测试大纲-模板.doc`：测试记录模板。
+- `浪潮英信服务器 NP5570M4 用户手册 V1.0.pdf`：服务器硬件参考。
 
-### 判据
+## 目录结构
 
-- 目标周期：5000 us
-- sender 与 receiver 默认 deadline：5500 us
-- `frame_id` 连续
-- `parse_fail_count = 0`
-- `crc_error_count = 0`
-- `tcp_disconnect_count = 0`
-- 严格实时验收时：`send_deadline_miss_count = 0` 且 `recv_deadline_miss_count = 0`
+```text
+common/       协议、CRC、日志、metrics、统计
+sender/       模拟数据生成、编码和 TCP 发送
+receiver/     TCP 接收、解析、连续性、队列和落盘
+tests/        CTest 单元与进程 smoke
+tools/        单路、十路和光口测试 runner
+configs/      多模块配置示例
+docs/         多模块验证说明
+```
 
-如果后续要测单帧端到端延迟，再加入 PTP 与硬件时间戳，不和这一阶段的单机单调时钟诊断混在一起。
+## 后续工作
 
-## 当前未决项
-
-- 上位机服务器 CPU 架构和操作系统
-- 真实网卡、光模块、光纤、交换机或光电转换器型号
-- 端到端延迟正式阈值
-- 真实探测器前端接口类型
-- 是否需要国产化、工业温度、无风扇、长期供货、固定 BOM 约束
-- 多模块阶段是否引入 PTP、硬件时间戳、UDP 数据面
-
-## 当前判断
-
-这个项目现在是**单模块链路原型**，不是最终完成版。下一步应该先完成：
-
-1. 上位机服务器信息确认
-2. 下位机 x86 和上位机网络连通
-3. 双机 1000 帧
-4. 双机 10 分钟
-5. 双机 1 小时
-6. 双机 24 小时
-7. 24 小时通过后再跑 72 小时
+1. 确认真实发送机/服务器 CPU、操作系统、网卡和光模块拓扑。
+2. 在双机环境完成 1000 帧、10 分钟、1 小时、24 小时测试。
+3. 将十路配置元数据接入真实 supervisor，补充启动失败、运行失败和统一报告处理。
+4. 根据现场拓扑决定 PTP、硬件时间戳、UDP 数据面和正式延迟指标。
+5. 接入真实探测器数据源，再进行 24/72 小时长期验收。

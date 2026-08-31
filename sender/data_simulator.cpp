@@ -2,15 +2,16 @@
 
 namespace cmb::sender {
 
-cmb::proto::Frame make_frame(std::uint64_t frame_id, std::uint64_t timestamp_ns) {
+cmb::proto::Frame make_frame(std::uint64_t frame_id, std::uint64_t timestamp_ns, std::uint16_t module_id) {
     cmb::proto::Frame frame;
     frame.payload.resize(cmb::proto::kChannelCount);
-    fill_frame(frame, frame_id, timestamp_ns);
+    fill_frame(frame, frame_id, timestamp_ns, module_id);
     return frame;
 }
 
-void fill_frame(cmb::proto::Frame& frame, std::uint64_t frame_id, std::uint64_t timestamp_ns) {
+void fill_frame(cmb::proto::Frame& frame, std::uint64_t frame_id, std::uint64_t timestamp_ns, std::uint16_t module_id) {
     frame.header = {};
+    frame.header.module_id = module_id;
     frame.header.frame_id = frame_id;
     frame.header.timestamp_ns = timestamp_ns;
     if (frame.payload.size() != cmb::proto::kChannelCount) {

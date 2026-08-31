@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -26,6 +27,7 @@ struct Options {
     std::string host{"127.0.0.1"};
     std::uint16_t port{9000};
     std::uint64_t frame_count{10};
+    std::uint16_t module_id{0};
     std::filesystem::path timing_log{};
     std::uint64_t deadline_us{kDefaultSendDeadlineUs};
 };
@@ -66,9 +68,17 @@ std::uint64_t parse_positive_u64(const char* text, const char* description) {
     return static_cast<std::uint64_t>(value);
 }
 
+std::uint16_t parse_module_id(const char* text) {
+    const unsigned long value = std::stoul(text);
+    if (value > std::numeric_limits<std::uint16_t>::max()) {
+        throw std::out_of_range("module_id must be in 0..65535");
+    }
+    return static_cast<std::uint16_t>(value);
+}
+
 void print_usage() {
     std::cerr << "usage: sender [host] [port] [frame_count]"
-                 " [--timing-log <path>] [--deadline-us <count>]\n";
+                 " [--module-id <id>] [--timing-log <path>] [--deadline-us <count>]\n";
 }
 
 Options parse_options(int argc, char** argv) {
@@ -76,7 +86,12 @@ Options parse_options(int argc, char** argv) {
     int positional_index = 0;
     for (int index = 1; index < argc; ++index) {
         const std::string argument = argv[index];
-        if (argument == "--timing-log") {
+        if (argument == "--module-id") {
+            if (++index == argc) {
+                throw std::invalid_argument("--module-id requires a value");
+            }
+            options.module_id = parse_module_id(argv[index]);
+        } else if (argument == "--timing-log") {
             if (++index == argc) {
                 throw std::invalid_argument("--timing-log requires a path");
             }
@@ -159,7 +174,7 @@ int main(int argc, char** argv) {
         const auto send_start = std::chrono::steady_clock::now();
         const auto schedule_late_us = late_us(scheduled, send_start);
         const auto encode_start = send_start;
-        cmb::sender::fill_frame(frame, frame_id, monotonic_ns());
+        cmb::sender::fill_frame(frame, frame_id, monotonic_ns(), options.module_id);
         cmb::sender::encode_frame_into(frame, bytes);
         const auto socket_send_start = std::chrono::steady_clock::now();
         const auto encode_us = micros_between(encode_start, socket_send_start);
