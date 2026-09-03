@@ -48,7 +48,7 @@ cmb::proto::Frame receive_one_frame(cmb::receiver::TcpReceiver& receiver) {
     return *result.frame;
 }
 
-void test_localhost_transfers_three_frames() {
+void test_localhost_transfers_three_frames(const std::string& bind_host = "") {
     constexpr std::uint16_t port = 9100;
     constexpr std::uint64_t frames = 3;
 
@@ -73,7 +73,7 @@ void test_localhost_transfers_three_frames() {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
     cmb::sender::TcpSender sender;
-    assert(sender.connect_to("127.0.0.1", port));
+    assert(sender.connect_to("127.0.0.1", port, bind_host));
     for (std::uint64_t i = 0; i < frames; ++i) {
         auto frame = cmb::sender::make_frame(i, 1000 + i);
         auto bytes = cmb::sender::encode_frame(frame);
@@ -96,6 +96,7 @@ void test_localhost_transfers_three_frames() {
 
 int main() {
     test_localhost_transfers_three_frames();
+    test_localhost_transfers_three_frames("127.0.0.1");
     std::cout << "local_smoke_tests passed\n";
     return 0;
 }

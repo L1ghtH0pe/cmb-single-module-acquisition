@@ -63,7 +63,7 @@ TcpSender::~TcpSender() {
     close();
 }
 
-bool TcpSender::connect_to(const std::string& host, std::uint16_t port) {
+bool TcpSender::connect_to(const std::string& host, std::uint16_t port, const std::string& bind_host) {
     close();
 
     addrinfo hints{};
@@ -77,6 +77,18 @@ bool TcpSender::connect_to(const std::string& host, std::uint16_t port) {
         return false;
     }
 
+    addrinfo* bind_results = nullptr;
+    if (!bind_host.empty()) {
+        addrinfo bind_hints{};
+        bind_hints.ai_family = AF_INET;
+        bind_hints.ai_socktype = SOCK_STREAM;
+        bind_hints.ai_protocol = IPPROTO_TCP;
+        if (getaddrinfo(bind_host.c_str(), nullptr, &bind_hints, &bind_results) != 0) {
+            freeaddrinfo(results);
+            return false;
+        }
+    }
+
     bool connected = false;
     for (auto* rp = results; rp != nullptr; rp = rp->ai_next) {
         socket_ = static_cast<SocketHandle>(::socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol));
@@ -87,6 +99,15 @@ bool TcpSender::connect_to(const std::string& host, std::uint16_t port) {
         int flag = 1;
         setsockopt(static_cast<NativeSocket>(socket_), IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&flag), sizeof(flag));
 
+        bool bound = bind_results == nullptr;
+        for (auto* bp = bind_results; bp != nullptr && !bound; bp = bp->ai_next) {
+            bound = ::bind(static_cast<NativeSocket>(socket_), bp->ai_addr, static_cast<int>(bp->ai_addrlen)) == 0;
+        }
+        if (!bound) {
+            close();
+            continue;
+        }
+
         if (::connect(static_cast<NativeSocket>(socket_), rp->ai_addr, static_cast<int>(rp->ai_addrlen)) == 0) {
             connected = true;
             break;
@@ -94,6 +115,9 @@ bool TcpSender::connect_to(const std::string& host, std::uint16_t port) {
         close();
     }
 
+    if (bind_results != nullptr) {
+        freeaddrinfo(bind_results);
+    }
     freeaddrinfo(results);
     return connected;
 }

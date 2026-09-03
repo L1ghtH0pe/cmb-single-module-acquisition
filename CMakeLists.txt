@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 project(cmb_single_module_proto LANGUAGES CXX)
 
 find_package(Threads REQUIRED)
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -111,3 +112,4 @@ add_test(NAME parser_tests COMMAND parser_tests)
 add_test(NAME storage_tests COMMAND storage_tests)
 add_test(NAME local_smoke_tests COMMAND local_smoke_tests)
 add_test(NAME local_process_smoke COMMAND local_process_smoke)
+add_test(NAME multi_host_tests COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/test_run_multi_host.py)

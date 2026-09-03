@@ -1,12 +1,16 @@
 # CMB 高速并行数据获取原型
 
-用于验证 CMB 探测器数据采集链路的实验性原型。核心链路支持单模块运行，并提供十模块 localhost 软件模型，在接入真实十路光纤/网卡前验证并发进程、模块身份、帧号连续性和分路落盘。
+用于验证 CMB 探测器数据采集链路的实验性原型。核心链路支持单模块运行、十模块 localhost 软件模型和分主机十路进程启动，用于逐步验证模块身份、帧号连续性、并发传输和分路落盘。
+
+已确定的目标部署拓扑为：
 
 ```text
-sender（模拟下位机） → TCP / 以太网 / 光纤链路 → receiver（上位机）
+下位机 PCIe SFP 光网卡（目标 10 口） ── 10 路光纤 ── 交换机 ── 普通电脑（receiver）
 ```
 
-> **定位**：验证原型，不是量产系统。sender 目前生成模拟数据；真实探测器接口、十路物理拓扑、PTP/硬件时间戳、故障切换和长期运行策略尚未完成。
+当前下位机已安装一张 Intel 82599ES 双口 SFP+ 网卡，系统接口为 `enp175s0f0` 和 `enp175s0f1`。2026-09-03 检查时两口均已建立 1 Gb/s 全双工链路；这是当前现场快照，不代表最终十路接口速率。交换机型号、上位机网口、IP/VLAN/路由和最终协商速率由网络负责人确定。
+
+> **定位**：验证原型，不是量产系统。sender 目前生成模拟数据；真实探测器数据源、最终十路网络配置、PTP/硬件时间戳、故障恢复和长期运行策略尚未完成。
 
 ## 当前实现
 
@@ -135,7 +139,7 @@ frame_id,timestamp_ns,offset,payload_bytes
 
 ## 当前状态
 
-截至 **2026-08-31**，代码已具备单模块 TCP 采集、CRC/解析/连续性检查、指标记录、分段落盘、单机回归、Linux 光口脚本和十路 localhost 软件验证。
+截至 **2026-09-04**，代码已具备单模块 TCP 采集、CRC/解析/连续性检查、指标记录、分段落盘、单机回归、Linux 光口脚本、十路 localhost 软件验证和分主机十路进程启动能力。
 
 已记录的历史结果：
 
@@ -144,8 +148,7 @@ frame_id,timestamp_ns,offset,payload_bytes
 
 这些是历史测试记录，不代表当前机器或未来硬件环境自动满足相同结果。以下内容仍未正式实现或验收：
 
-- 真实十路物理链路的一键 supervisor、启动同步和统一报告。
-- 配置文件中的网卡、IP、namespace 字段自动配置；当前十路 localhost runner 实际使用 `127.0.0.1` 和独立端口，其余字段是现场部署元数据。
+- 网络负责人提供最终交换机、上位机网口、IP/VLAN/路由和链路速率后，完成真实十路物理链路联调与验收。
 - PTP、硬件时间戳和正式端到端延迟阈值。
 - 真实探测器前端数据源、生产级恢复/重连、权限隔离和 24/72 小时最终验收。
 
@@ -166,7 +169,7 @@ ctest --test-dir build --output-on-failure
 ```text
 sender  receiver
 frame_tests  stats_tests  parser_tests  storage_tests
-local_smoke_tests  local_process_smoke
+local_smoke_tests  local_process_smoke  multi_host_tests
 ```
 
 ### 单路 localhost smoke
@@ -227,7 +230,7 @@ python3 tools/run_multi_local_smoke.py \
 module_id tx_iface rx_iface tx_ip rx_ip port tx_namespace rx_namespace
 ```
 
-当前脚本只使用 `module_id` 和 `port`；接口、IP、namespace 字段用于记录未来真实部署映射。summary 会列出每路 exit code、发送/接收 frame 数、原始字节数、分段数量和错误项。该测试验证十路独立 TCP 会话的软件并发，不等价于真实十路光纤验收。
+当前脚本只使用 `module_id` 和 `port`；其余字段作为现场部署映射。summary 会列出每路 exit code、发送/接收 frame 数、原始字节数、分段数量和错误项。该测试验证十路独立 TCP 会话的软件并发，不等价于真实十路光纤验收。
 
 输出示例：
 
@@ -241,6 +244,31 @@ module_id tx_iface rx_iface tx_ip rx_ip port tx_namespace rx_namespace
 └── summary.json
 ```
 
+### 十路双机启动
+
+先将 `configs/ten-channel.example.conf` 中的 TEST-NET 示例地址和接口名替换为网络负责人提供的现场配置。上位机普通电脑先启动 receiver 角色：
+
+```bash
+./tools/run-multi-host.sh --role receiver --frames 1000
+```
+
+然后在下位机启动 sender 角色：
+
+```bash
+./tools/run-multi-host.sh --role sender --frames 1000
+```
+
+启动前可在两台机器分别执行 dry-run，只校验配置并打印命令：
+
+```bash
+./tools/run-multi-host.sh --role receiver --frames 1000 --dry-run
+./tools/run-multi-host.sh --role sender --frames 1000 --dry-run
+```
+
+每个角色默认写入 `/tmp/cmb-multi-host/<role>/`，每个 module 使用独立工作目录、日志、metrics 和 capture。sender 通过 `--bind-host <tx_ip>` 绑定对应源地址；receiver 绑定 `<rx_ip>:<port>`。脚本不会配置物理接口、地址、VLAN、路由或交换机，也不会创建 namespace。如果配置中填写了 namespace，它必须事先存在；不使用时写 `-`。
+
+`tx_iface` 和 `rx_iface` 用于记录通道与现场端口的映射，启动器实际按 IP 绑定。普通电脑只有一个汇聚网口时，10 行可以使用相同 `rx_iface` 和 `rx_ip`，但端口和 module_id 必须唯一。下位机 10 个接口若处于同一二层或重叠网段，仅绑定源 IP 不足以保证正确选路，网络负责人还需配置独立子网、VLAN、策略路由或 namespace。
+
 ### 单路双机运行
 
 receiver 所在上位机：
@@ -252,7 +280,7 @@ receiver 所在上位机：
 sender 所在下位机：
 
 ```bash
-./build/sender <上位机IP> 9000 1000 --module-id 0
+./build/sender <上位机IP> 9000 1000 --module-id 0 --bind-host <本路下位机IP>
 ```
 
 参数顺序为：
@@ -266,6 +294,7 @@ sender:   <host> <port> <frame_count>
 
 ```text
 --module-id <0..65535>       sender 写入模块编号；receiver 开启身份校验
+--bind-host <local-ip>       sender 连接前绑定本地源 IPv4 地址
 --timing-log <path>          输出逐帧 timing CSV
 --capture-queue-frames <n>   receiver capture queue 容量
 --deadline-us <n>            sender deadline 阈值
@@ -344,7 +373,7 @@ rm -rf build logs captures test-results .claude tools/__pycache__
 
 - `PREEMPT_RT实时化技术分析.md`：实时化与内核部署参考。
 - `测试大纲-模板.doc`：测试记录模板。
-- `浪潮英信服务器 NP5570M4 用户手册 V1.0.pdf`：服务器硬件参考。
+- `浪潮英信服务器 NP5570M4 用户手册 V1.0.pdf`：早期服务器硬件参考，不代表当前上位机配置。
 
 ## 目录结构
 
@@ -360,8 +389,8 @@ docs/         多模块验证说明
 
 ## 后续工作
 
-1. 确认真实发送机/服务器 CPU、操作系统、网卡和光模块拓扑。
-2. 在双机环境完成 1000 帧、10 分钟、1 小时、24 小时测试。
-3. 将十路配置元数据接入真实 supervisor，补充启动失败、运行失败和统一报告处理。
+1. 获取网络负责人确认的交换机、上位机网口、IP/VLAN/路由和最终链路速率配置。
+2. 在当前双口基础上联调“下位机 SFP → 光纤 → 交换机 → 普通电脑”，再扩展到目标十路。
+3. 在双机环境完成每路 1000 帧、10 分钟、1 小时和 24 小时测试。
 4. 根据现场拓扑决定 PTP、硬件时间戳、UDP 数据面和正式延迟指标。
 5. 接入真实探测器数据源，再进行 24/72 小时长期验收。

@@ -25,6 +25,7 @@ constexpr std::uint64_t kDefaultSendDeadlineUs = 5500;
 
 struct Options {
     std::string host{"127.0.0.1"};
+    std::string bind_host{};
     std::uint16_t port{9000};
     std::uint64_t frame_count{10};
     std::uint16_t module_id{0};
@@ -78,7 +79,7 @@ std::uint16_t parse_module_id(const char* text) {
 
 void print_usage() {
     std::cerr << "usage: sender [host] [port] [frame_count]"
-                 " [--module-id <id>] [--timing-log <path>] [--deadline-us <count>]\n";
+                 " [--module-id <id>] [--bind-host <local-ip>] [--timing-log <path>] [--deadline-us <count>]\n";
 }
 
 Options parse_options(int argc, char** argv) {
@@ -91,6 +92,11 @@ Options parse_options(int argc, char** argv) {
                 throw std::invalid_argument("--module-id requires a value");
             }
             options.module_id = parse_module_id(argv[index]);
+        } else if (argument == "--bind-host") {
+            if (++index == argc) {
+                throw std::invalid_argument("--bind-host requires an address");
+            }
+            options.bind_host = argv[index];
         } else if (argument == "--timing-log") {
             if (++index == argc) {
                 throw std::invalid_argument("--timing-log requires a path");
@@ -148,12 +154,14 @@ int main(int argc, char** argv) {
     }
 
     cmb::sender::TcpSender sender;
-    if (!sender.connect_to(options.host, options.port)) {
-        logger.log(cmb::common::LogLevel::kError, "failed to connect to " + options.host + ":" + std::to_string(options.port));
+    if (!sender.connect_to(options.host, options.port, options.bind_host)) {
+        const auto source = options.bind_host.empty() ? std::string{} : " from " + options.bind_host;
+        logger.log(cmb::common::LogLevel::kError, "failed to connect" + source + " to " + options.host + ":" + std::to_string(options.port));
         return 1;
     }
 
-    logger.log(cmb::common::LogLevel::kInfo, "connected to " + options.host + ":" + std::to_string(options.port));
+    const auto source = options.bind_host.empty() ? std::string{} : " from " + options.bind_host;
+    logger.log(cmb::common::LogLevel::kInfo, "connected" + source + " to " + options.host + ":" + std::to_string(options.port));
 
     cmb::common::LatencyStats send_period_stats;
     cmb::common::LatencyStats schedule_late_stats;
