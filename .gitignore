@@ -3,6 +3,7 @@ build/
 logs/
 captures/raw/
 captures/meta/
+captures/sent/
 storage_writer_test/
 test-results/
 __pycache__/

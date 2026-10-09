@@ -15,7 +15,7 @@ cmb::proto::Frame make_sample_frame() {
     frame.header.timestamp_ns = 100;
     frame.payload.resize(cmb::proto::kChannelCount);
     for (std::size_t i = 0; i < frame.payload.size(); ++i) {
-        frame.payload[i] = static_cast<std::uint32_t>(i);
+        frame.payload[i] = {static_cast<std::int32_t>(i), static_cast<std::int32_t>(i) * -3};
     }
     return frame;
 }

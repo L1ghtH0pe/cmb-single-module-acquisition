@@ -13,6 +13,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+FRAME_BYTES = 4 + 44 + 1704 * 8 + 4  # wire frame, stored as-is in .bin
+FRAME_ID_OFFSET = 16
+
 
 @dataclass(frozen=True)
 class Channel:
@@ -72,13 +75,12 @@ def metric_int(metrics: dict[str, str], key: str, default: int = -1) -> int:
         return default
 
 
-def validate_channel(output: Path, channel: Channel, frames: int) -> dict[str, object]:
+def validate_channel(output: Path, channel: Channel, frames: int, frame_compare: Path) -> dict[str, object]:
     module = f"module-{channel.module_id:04d}"
     module_dir = output / "captures" / module
     receiver_metrics = read_metrics(module_dir / "logs" / "receiver-metrics.csv")
     sender_metrics = read_metrics(module_dir / "logs" / "sender-metrics.csv")
     raw_files = sorted((module_dir / "captures" / "raw").glob("segment-*.bin"))
-    index_files = sorted((module_dir / "captures" / "meta").glob("segment-*.csv"))
     raw_bytes = sum(path.stat().st_size for path in raw_files)
     receiver_frames = metric_int(receiver_metrics, "frame_count")
     sender_frames = metric_int(sender_metrics, "frame_count")
@@ -86,13 +88,18 @@ def validate_channel(output: Path, channel: Channel, frames: int) -> dict[str, o
               if metric_int(receiver_metrics, key) != 0]
     if sender_frames != frames or receiver_frames != frames:
         errors.append("frame_count")
-    if raw_bytes != frames * 6816:
+    if raw_bytes != frames * FRAME_BYTES:
         errors.append("raw_bytes")
+    compare = subprocess.run([str(frame_compare), str(module_dir / "captures" / "sent"), str(module_dir / "captures" / "raw")],
+                             capture_output=True, text=True)
+    (module_dir / "logs" / "frame-compare.txt").write_text(compare.stdout + compare.stderr, encoding="utf-8")
+    if compare.returncode != 0:
+        errors.append("frame_compare")
     return {"module_id": channel.module_id, "port": channel.port,
             "sender_exit": None, "receiver_exit": None,
             "sender_frames": sender_frames, "receiver_frames": receiver_frames,
             "raw_bytes": raw_bytes, "raw_segments": len(raw_files),
-            "index_segments": len(index_files), "errors": errors}
+            "frame_compare": "identical" if compare.returncode == 0 else "different", "errors": errors}
 
 
 def stop_all(processes: list[subprocess.Popen[str]]) -> None:
@@ -129,8 +136,8 @@ def main() -> int:
 
     sender = args.build_dir / "sender"
     receiver = args.build_dir / "receiver"
-    if not sender.exists() or not receiver.exists():
-        print("build/sender and build/receiver are required; run cmake --build build first", file=sys.stderr)
+    if not sender.exists() or not receiver.exists() or not (args.build_dir / "frame_compare").exists():
+        print("build/sender, build/receiver and build/frame_compare are required; run cmake --build build first", file=sys.stderr)
         return 2
 
     shutil.rmtree(args.output, ignore_errors=True)
@@ -172,13 +179,14 @@ def main() -> int:
             sender_processes.append(subprocess.Popen(
                 [str(sender), "127.0.0.1", str(channel.port), str(args.frames),
                  "--module-id", str(channel.module_id),
-                 "--timing-log", str(module_dir / "logs" / "sender-timing.csv")],
+                 "--timing-log", str(module_dir / "logs" / "sender-timing.csv"),
+                 "--save-sent", str(module_dir / "captures" / "sent")],
                 cwd=module_dir, stdout=sender_log,
                 stderr=sender_err, text=True))
         sender_codes = [process.wait(timeout=max(30, args.frames // 100 + 10)) for process in sender_processes]
         receiver_codes = [process.wait(timeout=30) for process in receiver_processes]
         for channel, sender_code, receiver_code in zip(channels, sender_codes, receiver_codes):
-            result = validate_channel(args.output, channel, args.frames)
+            result = validate_channel(args.output, channel, args.frames, args.build_dir / "frame_compare")
             result["sender_exit"] = sender_code
             result["receiver_exit"] = receiver_code
             if sender_code != 0:

@@ -17,9 +17,4 @@ std::uint32_t crc32(std::span<const std::byte> bytes) {
     return ~crc;
 }
 
-std::uint32_t crc32(std::span<const std::uint32_t> values) {
-    const auto* data = reinterpret_cast<const std::byte*>(values.data());
-    return crc32(std::span<const std::byte>(data, values.size_bytes()));
-}
-
 }  // namespace cmb::proto

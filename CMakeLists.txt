@@ -11,6 +11,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(common_lib
     common/frame.cpp
     common/crc32.cpp
+    common/capture_writer.cpp
+    common/capture_reader.cpp
     common/logger.cpp
     common/metrics.cpp
     common/latency_stats.cpp
@@ -34,7 +36,6 @@ add_executable(receiver
     receiver/frame_parser.cpp
     receiver/loss_detector.cpp
     receiver/tcp_receiver.cpp
-    receiver/storage_writer.cpp
 )
 target_link_libraries(receiver PRIVATE common_lib Threads::Threads)
 
@@ -60,9 +61,20 @@ add_executable(parser_tests
 )
 target_link_libraries(parser_tests PRIVATE common_lib)
 
+add_executable(frame_compare
+    tools/frame_check/frame_compare.cpp
+)
+target_link_libraries(frame_compare PRIVATE common_lib)
+
+add_executable(frame_gen
+    tools/frame_check/frame_gen.cpp
+    sender/data_simulator.cpp
+)
+target_link_libraries(frame_gen PRIVATE common_lib)
+
 add_executable(storage_tests
     tests/storage_tests.cpp
-    receiver/storage_writer.cpp
+    sender/data_simulator.cpp
 )
 target_link_libraries(storage_tests PRIVATE common_lib)
 
@@ -113,3 +125,5 @@ add_test(NAME storage_tests COMMAND storage_tests)
 add_test(NAME local_smoke_tests COMMAND local_smoke_tests)
 add_test(NAME local_process_smoke COMMAND local_process_smoke)
 add_test(NAME multi_host_tests COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/test_run_multi_host.py)
+add_test(NAME frame_check_tests COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/frame_check/test_frame_check.py ${CMAKE_CURRENT_BINARY_DIR})
+add_test(NAME frame_compare_fault_injection COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/frame_check/fault_injection_test.py ${CMAKE_CURRENT_BINARY_DIR})

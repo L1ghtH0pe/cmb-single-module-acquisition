@@ -1,3 +1,5 @@
+#include "common/capture_reader.h"
+#include "common/capture_writer.h"
 #include "common/latency_stats.h"
 #include "common/logger.h"
 #include "common/metrics.h"
@@ -13,6 +15,7 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -30,6 +33,9 @@ struct Options {
     std::uint64_t frame_count{10};
     std::uint16_t module_id{0};
     std::filesystem::path timing_log{};
+    std::filesystem::path save_sent_dir{};
+    std::filesystem::path input_path{};
+    bool validate_input_module{false};
     std::uint64_t deadline_us{kDefaultSendDeadlineUs};
 };
 
@@ -79,7 +85,8 @@ std::uint16_t parse_module_id(const char* text) {
 
 void print_usage() {
     std::cerr << "usage: sender [host] [port] [frame_count]"
-                 " [--module-id <id>] [--bind-host <local-ip>] [--timing-log <path>] [--deadline-us <count>]\n";
+                 " [--module-id <id>] [--bind-host <local-ip>] [--timing-log <path>] [--deadline-us <count>]"
+                 " [--save-sent <dir>] [--input <file.bin|dir>]\n";
 }
 
 Options parse_options(int argc, char** argv) {
@@ -92,6 +99,7 @@ Options parse_options(int argc, char** argv) {
                 throw std::invalid_argument("--module-id requires a value");
             }
             options.module_id = parse_module_id(argv[index]);
+            options.validate_input_module = true;
         } else if (argument == "--bind-host") {
             if (++index == argc) {
                 throw std::invalid_argument("--bind-host requires an address");
@@ -102,6 +110,16 @@ Options parse_options(int argc, char** argv) {
                 throw std::invalid_argument("--timing-log requires a path");
             }
             options.timing_log = argv[index];
+        } else if (argument == "--save-sent") {
+            if (++index == argc) {
+                throw std::invalid_argument("--save-sent requires a directory");
+            }
+            options.save_sent_dir = argv[index];
+        } else if (argument == "--input") {
+            if (++index == argc) {
+                throw std::invalid_argument("--input requires a .bin file or directory");
+            }
+            options.input_path = argv[index];
         } else if (argument == "--deadline-us") {
             if (++index == argc) {
                 throw std::invalid_argument("--deadline-us requires a count");
@@ -168,9 +186,27 @@ int main(int argc, char** argv) {
     cmb::common::LatencyStats send_work_stats;
     cmb::common::LatencyStats encode_stats;
     cmb::common::LatencyStats socket_send_stats;
+    std::optional<cmb::common::CaptureWriter> sent_capture;
+    if (!options.save_sent_dir.empty()) {
+        sent_capture.emplace(options.save_sent_dir);
+    }
+    std::optional<cmb::common::CaptureReader> input;
+    if (!options.input_path.empty()) {
+        input.emplace(options.input_path);
+        if (!input->ok()) {
+            logger.log(cmb::common::LogLevel::kError, "input error: " + input->error());
+            std::cerr << "sender input error: " << input->error() << "\n";
+            return 10;
+        }
+    }
     cmb::proto::Frame frame;
     frame.payload.resize(cmb::proto::kChannelCount);
     std::vector<std::byte> bytes;
+    if (input) {
+        bytes.resize(cmb::proto::kWireFrameSize);
+    }
+    std::uint64_t first_frame_id = 0;
+    std::uint64_t last_frame_id = 0;
     auto next_tick = std::chrono::steady_clock::now();
     auto previous_start = next_tick;
     std::uint64_t deadline_miss_count = 0;
@@ -182,8 +218,39 @@ int main(int argc, char** argv) {
         const auto send_start = std::chrono::steady_clock::now();
         const auto schedule_late_us = late_us(scheduled, send_start);
         const auto encode_start = send_start;
-        cmb::sender::fill_frame(frame, frame_id, monotonic_ns(), options.module_id);
-        cmb::sender::encode_frame_into(frame, bytes);
+        if (input) {
+            // Replay pre-built frames byte for byte; validate first so a bad file never reaches the wire.
+            if (!input->next(bytes)) {
+                logger.log(cmb::common::LogLevel::kError, "input ended after " + std::to_string(frame_id) + " frames");
+                std::cerr << "sender input ended after " << frame_id << " frames\n";
+                return 10;
+            }
+            std::string problem;
+            try {
+                cmb::proto::deserialize_frame_into(bytes, frame);
+                problem = cmb::proto::validate_frame(frame);
+            } catch (const std::exception& ex) {
+                problem = ex.what();
+            }
+            if (!problem.empty()) {
+                logger.log(cmb::common::LogLevel::kError, "invalid input frame at " + input->location() + ": " + problem);
+                std::cerr << "sender invalid input frame at " << input->location() << ": " << problem << "\n";
+                return 10;
+            }
+            if (options.validate_input_module && frame.header.module_id != options.module_id) {
+                logger.log(cmb::common::LogLevel::kError, "input frame module_id mismatch at " + input->location());
+                std::cerr << "sender input frame module_id " << frame.header.module_id << " != --module-id "
+                          << options.module_id << " at " << input->location() << "\n";
+                return 10;
+            }
+        } else {
+            cmb::sender::fill_frame(frame, frame_id, monotonic_ns(), options.module_id);
+            cmb::sender::encode_frame_into(frame, bytes);
+        }
+        if (frame_id == 0) {
+            first_frame_id = frame.header.frame_id;
+        }
+        last_frame_id = frame.header.frame_id;
         const auto socket_send_start = std::chrono::steady_clock::now();
         const auto encode_us = micros_between(encode_start, socket_send_start);
         if (!sender.send(std::span<const std::byte>(bytes))) {
@@ -191,6 +258,10 @@ int main(int argc, char** argv) {
             return 2;
         }
         const auto send_end = std::chrono::steady_clock::now();
+        if (sent_capture && !sent_capture->write(bytes)) {
+            logger.log(cmb::common::LogLevel::kError, "failed to save sent frame " + std::to_string(frame_id));
+            return 9;
+        }
         const auto socket_send_us = micros_between(socket_send_start, send_end);
         const auto work_us = micros_between(send_start, send_end);
         const bool deadline_miss = schedule_late_us > options.deadline_us;
@@ -224,6 +295,11 @@ int main(int argc, char** argv) {
         next_tick += std::chrono::microseconds(kFramePeriodUs);
     }
 
+    if (sent_capture && !sent_capture->flush()) {
+        logger.log(cmb::common::LogLevel::kError, "failed to flush sent capture");
+        return 9;
+    }
+
     if (timing) {
         timing.flush();
         if (!timing) {
@@ -233,8 +309,8 @@ int main(int argc, char** argv) {
     }
 
     cmb::common::MetricsSnapshot snapshot;
-    snapshot.frame_id_begin = 0;
-    snapshot.frame_id_end = options.frame_count - 1;
+    snapshot.frame_id_begin = first_frame_id;
+    snapshot.frame_id_end = last_frame_id;
     snapshot.frame_count = sender.sent_frames();
     snapshot.send_period_avg_us = send_period_stats.average();
     snapshot.send_period_max_us = send_period_stats.max();

@@ -1,3 +1,4 @@
+#include "common/capture_writer.h"
 #include "common/frame.h"
 #include "common/latency_stats.h"
 #include "common/logger.h"
@@ -5,7 +6,6 @@
 #include "receiver/capture_queue.h"
 #include "receiver/frame_parser.h"
 #include "receiver/loss_detector.h"
-#include "receiver/storage_writer.h"
 #include "receiver/tcp_receiver.h"
 
 #include <algorithm>
@@ -178,14 +178,14 @@ int main(int argc, char** argv) {
     cmb::common::LatencyStats storage_write_stats;
 
     std::thread capture_worker([&] {
-        cmb::receiver::StorageWriter storage{"captures/raw"};
+        cmb::common::CaptureWriter storage{"captures/raw"};
         std::size_t writes_since_flush = 0;
         for (;;) {
             auto* captured = capture_queue.consumer_slot();
             if (captured != nullptr) {
-                const auto frame_id = captured->frame.header.frame_id;
+                const auto frame_id = captured->frame_id;
                 const auto write_start = std::chrono::steady_clock::now();
-                const bool wrote = storage.write(captured->frame);
+                const bool wrote = storage.write(captured->wire);
                 storage_write_stats.add(micros_between(write_start, std::chrono::steady_clock::now()));
                 capture_queue.release();
                 if (!wrote) {
@@ -225,7 +225,7 @@ int main(int argc, char** argv) {
     cmb::common::LatencyStats parse_stats;
     std::chrono::steady_clock::time_point previous_wire_complete{};
     bool has_previous_wire_complete{false};
-    std::vector<std::byte> wire_buffer(cmb::proto::kWireFrameSize);
+    cmb::proto::Frame frame;
     std::uint64_t exit_code = 0;
 
     for (std::uint64_t index = 0; index < options.expected_frames; ++index) {
@@ -240,7 +240,8 @@ int main(int argc, char** argv) {
             exit_code = 9;
             break;
         }
-        if (!receiver.receive_exact(std::span<std::byte>(wire_buffer))) {
+        auto& captured = capture_queue.producer_slot();
+        if (!receiver.receive_exact(std::span<std::byte>(captured.wire))) {
             ++snapshot.tcp_disconnect_count;
             logger.log(cmb::common::LogLevel::kError, "failed to read complete frame");
             exit_code = 3;
@@ -265,10 +266,9 @@ int main(int argc, char** argv) {
         previous_wire_complete = wire_complete;
         has_previous_wire_complete = true;
 
-        auto& captured = capture_queue.producer_slot();
         std::string parse_message;
         const auto parse_start = std::chrono::steady_clock::now();
-        const auto parse_error = cmb::receiver::parse_frame_into(wire_buffer, captured.frame, parse_message);
+        const auto parse_error = cmb::receiver::parse_frame_into(captured.wire, frame, parse_message);
         const auto parse_us = micros_between(parse_start, std::chrono::steady_clock::now());
         parse_stats.add(parse_us);
         if (parse_error != cmb::receiver::ParseError::kNone) {
@@ -280,16 +280,17 @@ int main(int argc, char** argv) {
             exit_code = 4;
             break;
         }
-        if (options.validate_module_id && captured.frame.header.module_id != options.expected_module_id) {
+        if (options.validate_module_id && frame.header.module_id != options.expected_module_id) {
             ++snapshot.parse_fail_count;
             logger.log(cmb::common::LogLevel::kError,
-                       "unexpected module_id: " + std::to_string(captured.frame.header.module_id) +
+                       "unexpected module_id: " + std::to_string(frame.header.module_id) +
                            ", expected " + std::to_string(options.expected_module_id));
             exit_code = 5;
             break;
         }
 
-        continuity.observe(captured.frame.header.frame_id);
+        continuity.observe(frame.header.frame_id);
+        captured.frame_id = frame.header.frame_id;
         captured.wire_complete_steady_ns = wire_complete_ns;
         capture_queue.publish();
         const auto queue_depth = capture_queue.size();
@@ -299,7 +300,7 @@ int main(int argc, char** argv) {
         queue_ready.notify_one();
 
         if (timing) {
-            timing << captured.frame.header.frame_id << ',' << wire_complete_ns << ',' << gap_us << ',' << kRecvDeadlineUs << ','
+            timing << frame.header.frame_id << ',' << wire_complete_ns << ',' << gap_us << ',' << kRecvDeadlineUs << ','
                    << late_us << ',' << (deadline_miss ? 1 : 0) << ',' << parse_us << ',' << queue_depth << '\n';
         }
     }

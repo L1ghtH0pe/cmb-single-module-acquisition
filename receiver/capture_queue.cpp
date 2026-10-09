@@ -9,7 +9,7 @@ CaptureQueue::CaptureQueue(std::size_t capacity) : slots_(capacity + 1), capacit
         throw std::invalid_argument("capture queue capacity must be positive");
     }
     for (auto& slot : slots_) {
-        slot.frame.payload.resize(cmb::proto::kChannelCount);
+        slot.wire.resize(cmb::proto::kWireFrameSize);
     }
 }
 

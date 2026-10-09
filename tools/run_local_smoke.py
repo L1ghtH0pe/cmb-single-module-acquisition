@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import struct
 import os
 import shutil
 import subprocess
@@ -10,7 +11,8 @@ import sys
 import time
 from pathlib import Path
 
-PAYLOAD_BYTES = 1704 * 4
+FRAME_BYTES = 4 + 44 + 1704 * 8 + 4  # wire frame, stored as-is in .bin
+FRAME_ID_OFFSET = 16
 
 
 def project_root() -> Path:
@@ -22,11 +24,10 @@ def exe_name(name: str) -> str:
 
 
 def clean_runtime_dirs(root: Path) -> None:
-    for rel in ["logs", "captures/raw", "captures/meta"]:
+    for rel in ["logs", "captures/raw", "captures/sent", "captures/meta"]:
         shutil.rmtree(root / rel, ignore_errors=True)
     (root / "logs").mkdir(parents=True, exist_ok=True)
     (root / "captures" / "raw").mkdir(parents=True, exist_ok=True)
-    (root / "captures" / "meta").mkdir(parents=True, exist_ok=True)
 
 
 def read_text(path: Path) -> str:
@@ -73,33 +74,32 @@ def validate_metrics(root: Path, frames: int) -> None:
             raise RuntimeError("receiver frame_id_end mismatch")
 
 
+def read_frame_ids(segments: list[Path]) -> list[int]:
+    ids: list[int] = []
+    for path in segments:
+        data = path.read_bytes()
+        if len(data) % FRAME_BYTES != 0:
+            raise RuntimeError(f"{path.name} size {len(data)} is not a multiple of {FRAME_BYTES}")
+        ids.extend(struct.unpack_from("<Q", data, offset + FRAME_ID_OFFSET)[0] for offset in range(0, len(data), FRAME_BYTES))
+    return ids
+
+
 def validate_capture_segments(root: Path, frames: int) -> int:
-    raw_dir = root / "captures" / "raw"
-    meta_dir = root / "captures" / "meta"
-    segments = sorted(p for p in raw_dir.glob("segment-*.bin") if p.is_file())
-    indexes = sorted(p for p in meta_dir.glob("segment-*.csv") if p.is_file())
+    segments = sorted(p for p in (root / "captures" / "raw").glob("segment-*.bin") if p.is_file())
     if not segments:
         raise RuntimeError("no raw capture segments written")
-    if not indexes:
-        raise RuntimeError("no capture index files written")
+    ids = read_frame_ids(segments)
+    if ids != list(range(frames)):
+        raise RuntimeError(f"captured frame_id sequence mismatch: got {len(ids)} frames, expected 0..{frames - 1}")
+    return len(ids)
 
-    total_payload_bytes = sum(p.stat().st_size for p in segments)
-    expected_payload_bytes = frames * PAYLOAD_BYTES
-    if total_payload_bytes != expected_payload_bytes:
-        raise RuntimeError(f"raw payload size mismatch: got {total_payload_bytes}, expected {expected_payload_bytes}")
 
-    rows: list[dict[str, str]] = []
-    for path in indexes:
-        with path.open("r", encoding="utf-8", newline="") as f:
-            rows.extend(csv.DictReader(f))
-    if len(rows) != frames:
-        raise RuntimeError(f"index row count mismatch: got {len(rows)}, expected {frames}")
-    for i, row in enumerate(rows):
-        if int(row["frame_id"]) != i:
-            raise RuntimeError(f"index frame_id mismatch at row {i}")
-        if int(row["payload_bytes"]) != PAYLOAD_BYTES:
-            raise RuntimeError(f"index payload_bytes mismatch at row {i}")
-    return len(rows)
+def compare_sent_received(root: Path, build_dir: Path, env: dict[str, str]) -> None:
+    command = [str(build_dir / exe_name("frame_compare")), str(root / "captures" / "sent"), str(root / "captures" / "raw")]
+    result = subprocess.run(command, cwd=root, env=env, capture_output=True, text=True)
+    (root / "logs" / "frame-compare.txt").write_text(result.stdout + result.stderr, encoding="utf-8")
+    if result.returncode != 0:
+        raise RuntimeError("frame_compare reported differences; see logs/frame-compare.txt")
 
 
 def main() -> int:
@@ -154,7 +154,7 @@ def main() -> int:
 
         with sender_stdout.open("w", encoding="utf-8") as out, sender_stderr.open("w", encoding="utf-8") as err:
             sender_proc = subprocess.Popen(
-                [str(sender), args.host, str(args.port), str(args.frames)],
+                [str(sender), args.host, str(args.port), str(args.frames), "--save-sent", "captures/sent"],
                 cwd=root,
                 env=env,
                 stdout=out,
@@ -175,6 +175,7 @@ def main() -> int:
 
         captured_frames = validate_capture_segments(root, args.frames)
         validate_metrics(root, args.frames)
+        compare_sent_received(root, build_dir, env)
     except Exception as ex:
         if receiver_proc is not None:
             terminate_process(receiver_proc)
@@ -190,6 +191,7 @@ def main() -> int:
     print(f"sender_exit={sender_exit}")
     print(f"receiver_exit={receiver_exit}")
     print(f"captured_frames={captured_frames}")
+    print("frame_compare=identical")
     print(f"sender_metrics={'yes' if (root / 'logs' / 'sender-metrics.csv').exists() else 'no'}")
     print(f"receiver_metrics={'yes' if (root / 'logs' / 'receiver-metrics.csv').exists() else 'no'}")
     print("--- sender stdout ---")

@@ -38,7 +38,7 @@ struct ProcessHandle {
     int exit_code{1};
 };
 
-constexpr std::uintmax_t kPayloadBytes = 1704 * sizeof(std::uint32_t);
+constexpr std::uintmax_t kWireFrameBytes = 4 + 44 + 1704 * 8 + 4;
 
 std::string read_file(const fs::path& path) {
     std::ifstream in(path, std::ios::binary);
@@ -52,31 +52,6 @@ std::string read_file(const fs::path& path) {
 
 bool contains(const std::string& text, const std::string& needle) {
     return text.find(needle) != std::string::npos;
-}
-
-std::size_t count_index_rows(const fs::path& dir) {
-    std::size_t rows = 0;
-    if (!fs::exists(dir)) {
-        return 0;
-    }
-    for (const auto& entry : fs::directory_iterator(dir)) {
-        if (!entry.is_regular_file() || entry.path().extension() != ".csv") {
-            continue;
-        }
-        std::ifstream in(entry.path());
-        std::string line;
-        bool first = true;
-        while (std::getline(in, line)) {
-            if (first) {
-                first = false;
-                continue;
-            }
-            if (!line.empty()) {
-                ++rows;
-            }
-        }
-    }
-    return rows;
 }
 
 std::uintmax_t total_segment_bytes(const fs::path& dir) {
@@ -254,10 +229,9 @@ void terminate_process(ProcessHandle& handle) {
 void clean_runtime_dirs() {
     fs::remove_all("logs");
     fs::remove_all("captures/raw");
-    fs::remove_all("captures/meta");
+    fs::remove_all("captures/sent");
     fs::create_directories("logs");
     fs::create_directories("captures/raw");
-    fs::create_directories("captures/meta");
 }
 
 }  // namespace
@@ -293,7 +267,7 @@ int main(int argc, char** argv) {
     std::cout << "starting sender: " << sender_exe.string() << '\n';
     auto sender = start_process(
         sender_exe,
-        {"127.0.0.1", std::to_string(port), std::to_string(frames), "--timing-log", "logs/sender-timing.csv"},
+        {"127.0.0.1", std::to_string(port), std::to_string(frames), "--timing-log", "logs/sender-timing.csv", "--save-sent", "captures/sent"},
         "logs/sender-stdout.txt",
         "logs/sender-stderr.txt");
     if (
@@ -327,13 +301,15 @@ int main(int argc, char** argv) {
     const auto receiver_metrics = fs::exists("logs/receiver-metrics.csv") && metrics_contains_frame_count("logs/receiver-metrics.csv", frames);
     const auto sender_timing = csv_has_header_and_rows("logs/sender-timing.csv", "frame_id,scheduled_steady_ns,", frames);
     const auto receiver_timing = csv_has_header_and_rows("logs/receiver-timing.csv", "frame_id,wire_complete_steady_ns,", frames);
-    const auto captured_frames = count_index_rows("captures/meta");
     const auto raw_bytes = total_segment_bytes("captures/raw");
+    const auto sent_bytes = total_segment_bytes("captures/sent");
+    const auto captured_frames = raw_bytes / kWireFrameBytes;
 
     std::cout << "sender_exit=" << sender.exit_code << '\n';
     std::cout << "receiver_exit=" << receiver.exit_code << '\n';
     std::cout << "captured_frames=" << captured_frames << '\n';
     std::cout << "raw_bytes=" << raw_bytes << '\n';
+    std::cout << "sent_bytes=" << sent_bytes << '\n';
     std::cout << "sender_metrics=" << (sender_metrics ? "yes" : "no") << '\n';
     std::cout << "receiver_metrics=" << (receiver_metrics ? "yes" : "no") << '\n';
     std::cout << "sender_timing=" << (sender_timing ? "yes" : "no") << '\n';
@@ -341,7 +317,7 @@ int main(int argc, char** argv) {
     std::cout << "--- sender stdout ---\n" << sender_stdout;
     std::cout << "--- receiver stdout ---\n" << receiver_stdout;
 
-    const bool ok = sender.exit_code == 0 && receiver.exit_code == 0 && captured_frames == frames && raw_bytes == frames * kPayloadBytes && sender_metrics && receiver_metrics && sender_timing && receiver_timing && contains(sender_stdout, "sender sent ") && contains(receiver_stdout, "receiver received ");
+    const bool ok = sender.exit_code == 0 && receiver.exit_code == 0 && captured_frames == frames && raw_bytes == frames * kWireFrameBytes && sent_bytes == raw_bytes && sender_metrics && receiver_metrics && sender_timing && receiver_timing && contains(sender_stdout, "sender sent ") && contains(receiver_stdout, "receiver received ");
     if (!ok) {
         std::cerr << "local_process_smoke failed\n";
         return 1;

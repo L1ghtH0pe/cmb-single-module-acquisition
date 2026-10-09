@@ -35,6 +35,14 @@ class MultiHostTests(unittest.TestCase):
         self.assertEqual(receiver[1:4], ["19003", "1000", "192.168.13.1"])
         self.assertEqual(receiver[-2:], ["--module-id", "3"])
 
+    def test_sender_can_save_sent_frames(self) -> None:
+        path = self.write_config("1 a b 192.168.1.2 192.168.1.1 9001 - -\n")
+        channel = parse_config(path)[0]
+        sender = command_for(channel, "sender", Path("/opt/cmb/sender"), 10, False, True)
+        self.assertEqual(sender[-2:], ["--save-sent", "captures/sent"])
+        receiver = command_for(channel, "receiver", Path("/opt/cmb/receiver"), 10, False, True)
+        self.assertNotIn("--save-sent", receiver)
+
     def test_rejects_duplicate_ports(self) -> None:
         path = self.write_config(
             "0 a b 192.168.1.2 192.168.1.1 9000 - -\n"

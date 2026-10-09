@@ -45,6 +45,8 @@ std::array<std::byte, kHeaderSize> encode_header(FrameHeader header) {
     put_le(bytes, offset, header.timestamp_ns);
     put_le(bytes, offset, header.channel_count);
     put_le(bytes, offset, header.sample_rate_hz);
+    put_le(bytes, offset, header.sample_format);
+    put_le(bytes, offset, header.reserved);
     put_le(bytes, offset, header.payload_len);
     put_le(bytes, offset, header.header_crc);
 
@@ -68,10 +70,29 @@ FrameHeader decode_header(std::span<const std::byte> bytes) {
     header.timestamp_ns = get_le<std::uint64_t>(bytes, offset);
     header.channel_count = get_le<std::uint16_t>(bytes, offset);
     header.sample_rate_hz = get_le<std::uint16_t>(bytes, offset);
+    header.sample_format = get_le<std::uint16_t>(bytes, offset);
+    header.reserved = get_le<std::uint16_t>(bytes, offset);
     header.payload_len = get_le<std::uint32_t>(bytes, offset);
     header.header_crc = get_le<std::uint32_t>(bytes, offset);
 
     return header;
+}
+
+void encode_payload(const std::vector<ComplexSample>& payload, std::byte* out) {
+    for (const auto sample : payload) {
+        for (const auto part : {sample.re, sample.im}) {
+            const auto value = static_cast<std::uint32_t>(part);
+            for (std::size_t i = 0; i < sizeof(value); ++i) {
+                *out++ = static_cast<std::byte>((value >> (8 * i)) & 0xFF);
+            }
+        }
+    }
+}
+
+std::uint32_t payload_crc(const std::vector<ComplexSample>& payload) {
+    std::vector<std::byte> bytes(payload.size() * kSampleBytes);
+    encode_payload(payload, bytes.data());
+    return crc32(bytes);
 }
 
 }  // namespace
@@ -84,14 +105,12 @@ std::vector<std::byte> serialize_frame(const Frame& frame) {
 
 void serialize_frame_into(const Frame& frame, std::vector<std::byte>& result) {
     FrameHeader header = frame.header;
-    header.payload_len = static_cast<std::uint32_t>(frame.payload.size() * sizeof(std::uint32_t));
+    header.payload_len = static_cast<std::uint32_t>(frame.payload.size() * kSampleBytes);
     header.header_crc = 0;
 
     auto header_bytes = encode_header(header);
     header.header_crc = crc32(std::span<const std::byte>(header_bytes.data(), header_bytes.size()));
     header_bytes = encode_header(header);
-
-    const std::uint32_t payload_crc_value = crc32(std::span<const std::uint32_t>(frame.payload.data(), frame.payload.size()));
 
     result.clear();
     result.reserve(kFramePrefixSize + header_bytes.size() + header.payload_len + kFrameCrcSize);
@@ -100,9 +119,11 @@ void serialize_frame_into(const Frame& frame, std::vector<std::byte>& result) {
     put_le(result, header_len);
     result.insert(result.end(), header_bytes.begin(), header_bytes.end());
 
-    for (const auto sample : frame.payload) {
-        put_le(result, sample);
-    }
+    const auto payload_offset = result.size();
+    result.resize(payload_offset + header.payload_len);
+    encode_payload(frame.payload, result.data() + payload_offset);
+    const std::uint32_t payload_crc_value =
+        crc32(std::span<const std::byte>(result.data() + payload_offset, header.payload_len));
 
     put_le(result, payload_crc_value);
 }
@@ -127,8 +148,8 @@ void deserialize_frame_into(std::span<const std::byte> bytes, Frame& frame) {
     const auto header_span = bytes.subspan(kFramePrefixSize, header_len);
     frame.header = decode_header(header_span);
 
-    if (frame.header.payload_len % sizeof(std::uint32_t) != 0) {
-        throw std::runtime_error("payload length is not uint32 aligned");
+    if (frame.header.payload_len % kSampleBytes != 0) {
+        throw std::runtime_error("payload length is not a whole number of complex samples");
     }
     if (frame.header.payload_len != kPayloadBytes) {
         throw std::runtime_error("unexpected payload length");
@@ -139,13 +160,14 @@ void deserialize_frame_into(std::span<const std::byte> bytes, Frame& frame) {
         throw std::runtime_error("frame length mismatch");
     }
 
-    const std::size_t payload_count = frame.header.payload_len / sizeof(std::uint32_t);
+    const std::size_t payload_count = frame.header.payload_len / kSampleBytes;
     frame.payload.resize(payload_count);
 
     const auto payload_offset = kFramePrefixSize + header_len;
     std::size_t payload_cursor = payload_offset;
     for (auto& sample : frame.payload) {
-        sample = get_le<std::uint32_t>(bytes, payload_cursor);
+        sample.re = static_cast<std::int32_t>(get_le<std::uint32_t>(bytes, payload_cursor));
+        sample.im = static_cast<std::int32_t>(get_le<std::uint32_t>(bytes, payload_cursor));
     }
     frame.payload_crc = get_le<std::uint32_t>(bytes, payload_cursor);
 }
@@ -166,7 +188,10 @@ std::string validate_frame(const Frame& frame) {
     if (frame.header.sample_rate_hz != kSampleRateHz) {
         return "unexpected sample rate";
     }
-    if (frame.header.payload_len != frame.payload.size() * sizeof(std::uint32_t)) {
+    if (frame.header.sample_format != kSampleFormatComplexInt32) {
+        return "unexpected sample format";
+    }
+    if (frame.header.payload_len != frame.payload.size() * kSampleBytes) {
         return "payload length mismatch";
     }
 
@@ -180,8 +205,7 @@ std::string validate_frame(const Frame& frame) {
         return "header crc mismatch";
     }
 
-    const auto expected_payload_crc = crc32(std::span<const std::uint32_t>(frame.payload.data(), frame.payload.size()));
-    if (frame.payload_crc != expected_payload_crc) {
+    if (frame.payload_crc != payload_crc(frame.payload)) {
         return "payload crc mismatch";
     }
 

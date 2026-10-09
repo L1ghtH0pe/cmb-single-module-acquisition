@@ -82,7 +82,7 @@ def parse_config(path: Path) -> list[Channel]:
     return channels
 
 
-def command_for(channel: Channel, role: str, executable: Path, frames: int, timing_log: bool) -> list[str]:
+def command_for(channel: Channel, role: str, executable: Path, frames: int, timing_log: bool, save_sent: bool = False) -> list[str]:
     if role == "receiver":
         command = [
             str(executable), str(channel.port), str(frames), channel.rx_ip,
@@ -95,6 +95,8 @@ def command_for(channel: Channel, role: str, executable: Path, frames: int, timi
             "--module-id", str(channel.module_id), "--bind-host", channel.tx_ip,
         ]
         namespace = channel.tx_namespace
+        if save_sent:
+            command.extend(["--save-sent", "captures/sent"])
     if timing_log:
         command.extend(["--timing-log", "logs/timing.csv"])
     if namespace:
@@ -111,6 +113,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--build-dir", type=Path, default=root / "build")
     parser.add_argument("--output", type=Path, default=Path("/tmp/cmb-multi-host"))
     parser.add_argument("--timing-log", action="store_true", help="write per-frame timing CSV files")
+    parser.add_argument("--save-sent", action="store_true", help="sender: also save sent frames to captures/sent for frame_compare")
     parser.add_argument("--dry-run", action="store_true", help="validate and print commands without starting processes")
     return parser.parse_args()
 
@@ -136,7 +139,7 @@ def main() -> int:
 
     channels = parse_config(args.config)
     executable = (args.build_dir / exe_name(args.role)).resolve()
-    commands = [command_for(channel, args.role, executable, args.frames, args.timing_log) for channel in channels]
+    commands = [command_for(channel, args.role, executable, args.frames, args.timing_log, args.save_sent) for channel in channels]
     plan = {
         "role": args.role,
         "frames": args.frames,

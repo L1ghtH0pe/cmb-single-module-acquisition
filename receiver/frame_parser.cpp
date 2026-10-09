@@ -70,7 +70,7 @@ std::uint32_t peek_header_len(const std::vector<std::byte>& prefix) {
 
 std::uint32_t peek_payload_len(const std::vector<std::byte>& header_bytes) {
     if (header_bytes.size() != cmb::proto::kHeaderSize) {
-        throw std::runtime_error("header must be 40 bytes");
+        throw std::runtime_error("unexpected header size");
     }
 
     constexpr std::size_t payload_len_offset =
@@ -82,7 +82,9 @@ std::uint32_t peek_payload_len(const std::vector<std::byte>& header_bytes) {
         sizeof(std::uint64_t) +     // frame_id
         sizeof(std::uint64_t) +     // timestamp_ns
         sizeof(std::uint16_t) +     // channel_count
-        sizeof(std::uint16_t);      // sample_rate_hz
+        sizeof(std::uint16_t) +     // sample_rate_hz
+        sizeof(std::uint16_t) +     // sample_format
+        sizeof(std::uint16_t);      // reserved
 
     return read_u32_le(header_bytes, payload_len_offset);
 }

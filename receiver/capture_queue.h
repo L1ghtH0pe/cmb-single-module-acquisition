@@ -10,7 +10,8 @@
 namespace cmb::receiver {
 
 struct CapturedFrame {
-    cmb::proto::Frame frame{};
+    std::vector<std::byte> wire{};  // complete validated wire frame, written to .bin as-is
+    std::uint64_t frame_id{0};
     std::uint64_t wire_complete_steady_ns{0};
 };
 

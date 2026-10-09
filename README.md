@@ -16,126 +16,113 @@
 
 ### 数据面与协议
 
-- C++20 `sender` 和 `receiver` 可执行程序。
+- C++20 `sender` 和 `receiver` 可执行程序，另有 `frame_gen`/`frame_compare` 收发校验工具。
 - TCP 长连接承载应用层 frame；TCP 本身只提供字节流。
-- 协议版本为 v1，所有线上整数均按 little-endian 编码。
-- 每帧包含 1704 个 `uint32_t` 采样值，即 6816 bytes payload。
+- 协议版本为 v2，所有线上整数均按 little-endian 编码。
+- 每帧包含 1704 个通道的复数采样（实部、虚部各一个 `int32`），即 13632 bytes payload。
 - sender 默认以 200 Hz（5 ms）周期生成模拟数据，每路 `frame_id` 从 0 递增。
-- receiver 检查 magic、版本、长度、header CRC、payload CRC 和 frame 合法性。
+- receiver 检查 magic、版本、长度、采样格式、header CRC、payload CRC 和 frame 合法性。
 
 ## 数据格式
 
 ### TCP 线上帧
 
-每个 TCP 应用层帧固定为 **6864 bytes**：
+每个 TCP 应用层帧固定为 **13684 bytes**：
 
 ```text
-┌────────────────────┬─────────────────┬──────────────────────┬─────────────────────┐
-│ header_len (4 B)   │ header (40 B)   │ payload (6816 B)     │ payload_crc (4 B)   │
-└────────────────────┴─────────────────┴──────────────────────┴─────────────────────┘
-wire offset: 0        4                 44                     6860                6864
+┌────────────────────┬─────────────────┬───────────────────────┬─────────────────────┐
+│ header_len (4 B)   │ header (44 B)   │ payload (13632 B)     │ payload_crc (4 B)   │
+└────────────────────┴─────────────────┴───────────────────────┴─────────────────────┘
+wire offset: 0        4                 48                      13680               13684
 ```
 
-TCP 不保留消息边界。receiver 必须先读取 4-byte `header_len`，再读取 header，并根据 header 中的 `payload_len` 收齐 payload 和末尾 CRC；不能假定一次 `recv()` 对应一帧。
+TCP 不保留消息边界。receiver 必须按帧长收齐字节再解析；不能假定一次 `recv()` 对应一帧。
 
 #### 帧头字段
 
-`header_len` 当前固定为 40。紧随其后的 40-byte header 布局如下；“帧内偏移”从 `header_len` 的第一个字节开始计算：
+`header_len` 当前固定为 44。“帧内偏移”从 `header_len` 的第一个字节开始计算：
 
-| 帧内偏移 | header 内偏移 | 长度 | 类型 | 字段 | v1 含义/固定值 |
+| 帧内偏移 | header 内偏移 | 长度 | 类型 | 字段 | v2 含义/固定值 |
 |---:|---:|---:|---|---|---|
-| 0 | — | 4 | `uint32_le` | `header_len` | `40` |
+| 0 | — | 4 | `uint32_le` | `header_len` | `44` |
 | 4 | 0 | 4 | `uint32_le` | `magic` | `0x434D4231`（CMB1） |
-| 8 | 4 | 2 | `uint16_le` | `version` | `1` |
-| 10 | 6 | 2 | `uint16_le` | `header_size` | `40` |
+| 8 | 4 | 2 | `uint16_le` | `version` | `2` |
+| 10 | 6 | 2 | `uint16_le` | `header_size` | `44` |
 | 12 | 8 | 2 | `uint16_le` | `module_id` | 模块编号，范围 `0..65535` |
 | 14 | 10 | 2 | `uint16_le` | `flags` | 当前固定为 `0`，预留 |
 | 16 | 12 | 8 | `uint64_le` | `frame_id` | 每个 sender 从 `0` 连续递增 |
 | 24 | 20 | 8 | `uint64_le` | `timestamp_ns` | sender 的单调时钟时间戳，单位 ns |
 | 32 | 28 | 2 | `uint16_le` | `channel_count` | `1704` |
 | 34 | 30 | 2 | `uint16_le` | `sample_rate_hz` | `200` |
-| 36 | 32 | 4 | `uint32_le` | `payload_len` | `6816` |
-| 40 | 36 | 4 | `uint32_le` | `header_crc` | header CRC-32 |
-| 44 | — | 6816 | `1704 × uint32_le` | `payload` | 通道 0～1703 的采样值 |
-| 6860 | — | 4 | `uint32_le` | `payload_crc` | payload CRC-32 |
+| 36 | 32 | 2 | `uint16_le` | `sample_format` | `1` = complex int32（re 在前，im 在后） |
+| 38 | 34 | 2 | `uint16_le` | `reserved` | `0` |
+| 40 | 36 | 4 | `uint32_le` | `payload_len` | `13632` |
+| 44 | 40 | 4 | `uint32_le` | `header_crc` | header CRC-32 |
+| 48 | — | 13632 | `1704 × (int32_le re, int32_le im)` | `payload` | 通道 0～1703 的复数采样 |
+| 13680 | — | 4 | `uint32_le` | `payload_crc` | payload CRC-32 |
 
 `timestamp_ns` 来自 `std::chrono::steady_clock`，只适合计算同一运行环境内的时间间隔；它不是 UTC/Unix 时间，也不能直接用于跨主机时钟对齐。
 
 #### Payload 通道顺序与模拟值
 
-payload 中第 `i` 个 32-bit 值对应通道 `i`，其中 `0 <= i < 1704`，不存在通道间 padding。当前模拟 sender 生成：
+payload 中第 `i` 个 8-byte 采样对应通道 `i`（`0 <= i < 1704`），前 4 bytes 为实部、后 4 bytes 为虚部，均为二进制补码 `int32_le`，无 padding。当前模拟 sender 生成：
 
 ```text
-payload[i] = uint32(frame_id + i)
+re[i] = int32(uint32(frame_id + i))
+im[i] = int32(~uint32(frame_id + i))
 ```
 
-例如 `frame_id = 42` 时，前 4 个通道值为 `42, 43, 44, 45`。接入真实探测器后，应保持 1704 通道的顺序和 `uint32_le` 线格式，或通过升级协议版本明确变更。
+例如 `frame_id = 42` 时，通道 0 为 `(42, -43)`，通道 1 为 `(43, -44)`。接入真实探测器后，定点比例、通道数和采样格式如有变化，通过 `sample_format`、`channel_count` 和协议版本明确表达。
 
 #### CRC-32
 
 header 和 payload 都使用 reflected CRC-32：多项式 `0xEDB88320`、初值 `0xFFFFFFFF`、结果按位取反。
 
-- `header_crc`：先将 header 中的 `header_crc` 字段置 0，再对完整 40-byte header 计算。
-- `payload_crc`：对线上 6816-byte payload 计算。
-- 当前开发与验收目标为 x86 little-endian 主机；若移植到 big-endian 平台，应补充 payload CRC 和落盘字节序测试。
+- `header_crc`：先将 header 中的 `header_crc` 字段置 0，再对完整 44-byte header 计算。
+- `payload_crc`：对线上 13632-byte payload 计算。
 
 #### 带宽
 
 单路 200 Hz 时：
 
-- payload：`6816 × 200 = 1,363,200 bytes/s`。
-- 完整线上帧：`6864 × 200 = 1,372,800 bytes/s`，不含 TCP/IP/以太网开销。
-- 十路完整帧合计约 `13,728,000 bytes/s`，不含协议栈开销。
+- payload：`13632 × 200 = 2,726,400 bytes/s`。
+- 完整线上帧：`13684 × 200 = 2,736,800 bytes/s`，不含 TCP/IP/以太网开销。
+- 十路完整帧合计约 `27,368,000 bytes/s`（约 219 Mbit/s），不含协议栈开销。
 
 ### Receiver 落盘格式
 
-receiver 校验通过后只落盘 payload，不把 4-byte prefix、40-byte header 或两个 CRC 写入 `.bin`。默认每 10000 帧形成一个分段：
+receiver 校验通过后，把完整的 13684-byte 线上帧原样写入 `.bin`，不生成 CSV。默认每 10000 帧一个分段：
 
 ```text
-captures/
-├── raw/segment-000000.bin
-└── meta/segment-000000.csv
+captures/raw/segment-000000.bin
+captures/raw/segment-000001.bin
 ```
-
-`segment-XXXXXX.bin` 是连续 payload 字节：
 
 ```text
-[frame 0: 6816 B][frame 1: 6816 B]...[frame N: 6816 B]
+[frame 0: 13684 B][frame 1: 13684 B]...[frame N: 13684 B]
 ```
 
-对应 CSV 首行为：
+第 `k` 帧位于文件偏移 `k × 13684`，`frame_id` 在帧内偏移 16。每帧自带 header 和两个 CRC，`.bin` 可独立解析和校验，不需要额外索引文件。
 
-```csv
-frame_id,timestamp_ns,offset,payload_bytes
-```
+### 收发一致性校验
 
-每行记录该帧在当前 `.bin` 分段内的字节偏移和长度。例如：
-
-```csv
-frame_id,timestamp_ns,offset,payload_bytes
-0,123456789,0,6816
-1,128456789,6816,6816
-```
-
-读取第 `n` 行时，从对应 `.bin` 的 `offset` 位置读取 `payload_bytes`，再按 1704 个 `uint32_le` 解码。当前 x86 目标上的落盘字节与线上 payload 字节序一致；`.bin` 本身不含文件头，因此必须与同名 CSV 索引配套使用。
+`frame_gen` 生成源 `.bin`，`sender --input` 原样发送，`sender --save-sent` 另存实际发出的字节，`frame_compare` 按 `frame_id` 逐字节比对源文件/发送端与 receiver 落盘文件。单路、十路和光口 runner 都会自动比对。详见 [tools/frame_check/README.md](tools/frame_check/README.md)。
 
 ### 诊断与落盘
 
-- sender/receiver 输出 runtime log 和聚合 metrics CSV。
+- sender/receiver 输出 runtime log 和聚合 metrics CSV（诊断用，不是采集数据）。
 - sender 记录周期、调度迟到、deadline miss、编码和 socket 发送耗时。
 - receiver 记录接收间隔、deadline miss、解析耗时、队列水位、队列溢出和写盘耗时。
 - receiver 检测 frame_id 缺帧、重复和乱序；指定 `--module-id` 后还会校验模块身份。
-- receiver 使用有界 capture queue 和分段文件落盘：
-  - `captures/raw/segment-XXXXXX.bin`：连续 payload 二进制。
-  - `captures/meta/segment-XXXXXX.csv`：frame_id、timestamp、偏移和长度索引。
+- receiver 使用有界 capture queue 和分段 `.bin` 落盘。
 - `--timing-log` 可选开启逐帧 timing CSV；默认只写聚合 metrics，避免诊断 I/O 影响周期。
 
 ### 测试能力
 
-- CTest：frame、统计、解析、存储和跨平台进程 smoke 测试。
-- Python 单路 smoke：检查进程、frame 数、capture 大小、索引和 metrics。
+- CTest：frame、统计、解析、存储、`frame_compare` 和跨平台进程 smoke 测试。
+- Python 单路 smoke：检查进程、frame 数、capture 大小、frame_id 连续性、metrics 和收发一致性。
 - Linux 光口 loopback runner：可创建 network namespace，记录 NIC counters，并输出 `summary.json`。
-- 十路 localhost runner：读取十路 module/端口映射，启动十组独立 sender/receiver，并按模块保存日志、metrics 和 capture。
+- 十路 localhost runner：读取十路 module/端口映射，启动十组独立 sender/receiver，并按模块保存日志、metrics、capture 和比对结果。
 
 ## 当前状态
 
@@ -144,7 +131,7 @@ frame_id,timestamp_ns,offset,payload_bytes
 已记录的历史结果：
 
 - Windows/MSYS2 本地 10 分钟 smoke 已通过。
-- 单路真实双光口 200 Hz / 10 分钟验收已记录：120000 帧完整，连续性、CRC、解析、TCP/NIC 错误正常，sender/receiver deadline miss 为 0。
+- 单路真实双光口 200 Hz / 10 分钟验收已记录（v1 协议，6864-byte 标量帧）：120000 帧完整，连续性、CRC、解析、TCP/NIC 错误正常，sender/receiver deadline miss 为 0。
 
 这些是历史测试记录，不代表当前机器或未来硬件环境自动满足相同结果。以下内容仍未正式实现或验收：
 
@@ -167,9 +154,9 @@ ctest --test-dir build --output-on-failure
 不使用 Ninja 时可省略 `-G Ninja`。CMake targets：
 
 ```text
-sender  receiver
+sender  receiver  frame_gen  frame_compare
 frame_tests  stats_tests  parser_tests  storage_tests
-local_smoke_tests  local_process_smoke  multi_host_tests
+local_smoke_tests  local_process_smoke  multi_host_tests  frame_check_tests
 ```
 
 ### 单路 localhost smoke
@@ -198,7 +185,7 @@ powershell -ExecutionPolicy Bypass -File tools/run-local-smoke.ps1 -Port 9000 -F
 ./tools/run-local-smoke.sh 9000 120000 900
 ```
 
-runner 会清理并重建 `logs/`、`captures/raw/`、`captures/meta/`，启动 receiver/sender，并校验输出、frame 数、CRC/解析错误、capture 大小和索引连续性。
+runner 会清理并重建 `logs/`、`captures/raw/`、`captures/sent/`，启动 receiver/sender，并校验输出、frame 数、CRC/解析错误、capture 大小、frame_id 连续性，最后用 `frame_compare` 比对收发帧（结果在 `logs/frame-compare.txt`）。
 
 ### 十路 localhost smoke
 
@@ -230,7 +217,7 @@ python3 tools/run_multi_local_smoke.py \
 module_id tx_iface rx_iface tx_ip rx_ip port tx_namespace rx_namespace
 ```
 
-当前脚本只使用 `module_id` 和 `port`；其余字段作为现场部署映射。summary 会列出每路 exit code、发送/接收 frame 数、原始字节数、分段数量和错误项。该测试验证十路独立 TCP 会话的软件并发，不等价于真实十路光纤验收。
+当前脚本只使用 `module_id` 和 `port`；其余字段作为现场部署映射。summary 会列出每路 exit code、发送/接收 frame 数、原始字节数、分段数量、`frame_compare` 结果和错误项。该测试验证十路独立 TCP 会话的软件并发，不等价于真实十路光纤验收。
 
 输出示例：
 
@@ -240,7 +227,7 @@ module_id tx_iface rx_iface tx_ip rx_ip port tx_namespace rx_namespace
 ├── captures/
 │   └── module-0000/
 │       ├── logs/                 # 该路 runtime/metrics/timing
-│       └── captures/             # raw/ 与 meta/
+│       └── captures/             # raw/（接收）与 sent/（发送）
 └── summary.json
 ```
 
@@ -298,14 +285,18 @@ sender:   <host> <port> <frame_count>
 --timing-log <path>          输出逐帧 timing CSV
 --capture-queue-frames <n>   receiver capture queue 容量
 --deadline-us <n>            sender deadline 阈值
+--save-sent <dir>            sender 同时把发出的帧写入 <dir>/segment-*.bin
+--input <file.bin|dir>       sender 按原样重放 frame_gen 生成的帧
 ```
+
+双机时把 `source.bin` 或 sender 的 `--save-sent` 目录拷到 receiver 主机，再运行 `frame_compare <expected> captures/raw`。`run-multi-host.sh --role sender --save-sent` 会为每路加上该参数。
 
 两端的 `module_id` 必须一致；端口必须一致。默认输出路径相对于进程当前工作目录：
 
 ```text
 logs/sender-runtime.log       logs/receiver-runtime.log
 logs/sender-metrics.csv       logs/receiver-metrics.csv
-captures/raw/segment-*.bin    captures/meta/segment-*.csv
+captures/raw/segment-*.bin    captures/sent/segment-*.bin（sender 加 --save-sent 时）
 ```
 
 ## 验收指标
@@ -316,6 +307,7 @@ captures/raw/segment-*.bin    captures/meta/segment-*.csv
 - `frame_id_begin` / `frame_id_end` 与连续性检查一致。
 - `parse_fail_count = 0`、`crc_error_count = 0`、`tcp_disconnect_count = 0`。
 - `capture_queue_overrun_count = 0`。
+- `frame_compare` 输出 `result=IDENTICAL`。
 - `send_period_avg_us` 和 `recv_gap_avg_us` 接近 5000。
 - p999、max 和 deadline miss 指标有记录并可解释。
 - 真实硬件测试前后记录 `uname -a`、`lscpu`、`lspci -nn`、`ip link`、`ethtool <iface>`、`ethtool -S <iface>` 和 `journalctl -b`。
@@ -338,20 +330,24 @@ sudo ./tools/run-optical-loopback.sh --preset 1000
 --keep-namespaces         测试后保留 namespace 供排查
 --skip-build              跳过自动构建
 --allow-deadline-miss     调查模式，允许 deadline miss
+--gen-pattern <counter|random>  先用 frame_gen 生成源文件再发送
+--input <file.bin>        发送指定源文件
 ```
+
+每次运行都会比对 `captures/sent` 与 `captures/raw`；使用 `--gen-pattern`/`--input` 时还比对源文件与 `captures/raw`，结果写入 `frame-compare*.txt` 和 `summary.json`。
 
 默认严格模式要求 sender 和 receiver deadline miss 均为 0。脚本结束时会清理自己创建的 namespace；使用 `--keep-namespaces` 后需手工清理。
 
 ## 磁盘估算
 
-仅计算单路 payload（6816 bytes/frame），不含 header、索引和日志：
+按单路完整线上帧（13684 bytes/frame）计算，不含日志；sender 启用 `--save-sent` 时发送端占用相同空间：
 
-| 时长 | 帧数 | 单路 payload |
+| 时长 | 帧数 | 单路 `.bin` |
 |---|---:|---:|
-| 10 分钟 | 120000 | 约 818 MB |
-| 1 小时 | 720000 | 约 4.9 GB |
-| 24 小时 | 17280000 | 约 118 GB |
-| 72 小时 | 51840000 | 约 353 GB |
+| 10 分钟 | 120000 | 约 1.6 GB |
+| 1 小时 | 720000 | 约 9.9 GB |
+| 24 小时 | 17280000 | 约 236 GB |
+| 72 小时 | 51840000 | 约 709 GB |
 
 十路约为单路十倍，正式测试还需预留文件系统和故障重试空间。
 
@@ -378,11 +374,11 @@ rm -rf build logs captures test-results .claude tools/__pycache__
 ## 目录结构
 
 ```text
-common/       协议、CRC、日志、metrics、统计
+common/       协议、CRC、.bin 分段写入、日志、metrics、统计
 sender/       模拟数据生成、编码和 TCP 发送
-receiver/     TCP 接收、解析、连续性、队列和落盘
+receiver/     TCP 接收、解析、连续性和队列
 tests/        CTest 单元与进程 smoke
-tools/        单路、十路和光口测试 runner
+tools/        单路、十路和光口测试 runner；frame_check/ 收发校验工具
 configs/      多模块配置示例
 docs/         多模块验证说明
 ```
