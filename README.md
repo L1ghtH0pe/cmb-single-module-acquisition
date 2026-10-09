@@ -368,7 +368,6 @@ rm -rf build logs captures test-results .claude tools/__pycache__
 长时间 capture 可能占用数百 GB；测试前确认输出路径、磁盘剩余空间和保留策略。根目录参考资料不是运行生成物：
 
 - `PREEMPT_RT实时化技术分析.md`：实时化与内核部署参考。
-- `测试大纲-模板.doc`：测试记录模板。
 - `浪潮英信服务器 NP5570M4 用户手册 V1.0.pdf`：早期服务器硬件参考，不代表当前上位机配置。
 
 ## 目录结构
