@@ -11,6 +11,7 @@
 #include "common/capture_reader.h"
 #include "common/frame.h"
 
+#include <bit>
 #include <cstdint>
 #include <cstdio>
 #include <iostream>
@@ -156,6 +157,8 @@ int main(int argc, char** argv) {
     }
 
     std::uint64_t identical = 0;
+    std::uint64_t compared = 0;    // frame pairs compared byte by byte
+    std::uint64_t bit_errors = 0;  // differing bits over all compared pairs
     std::uint64_t mismatched = 0;
     std::uint64_t missing = 0;
     std::uint64_t unexpected = 0;
@@ -190,13 +193,18 @@ int main(int argc, char** argv) {
         const auto& b = actual.wire();
         std::size_t first = a.size();
         std::size_t differing = 0;
+        std::uint64_t frame_bit_errors = 0;
         for (std::size_t i = 0; i < a.size(); ++i) {
-            if (a[i] != b[i]) {
+            const auto diff = static_cast<unsigned>(a[i] ^ b[i]);
+            if (diff != 0) {
+                frame_bit_errors += static_cast<std::uint64_t>(std::popcount(diff));
                 if (differing++ == 0) {
                     first = i;
                 }
             }
         }
+        ++compared;
+        bit_errors += frame_bit_errors;
         if (differing == 0) {
             ++identical;
         } else {
@@ -206,6 +214,7 @@ int main(int argc, char** argv) {
                           static_cast<unsigned>(b[first]));
             report("MISMATCH frame_id=" + std::to_string(expected.frame_id()) + " first_offset=" + std::to_string(first) +
                    " field=" + field_at(first) + " " + values + " differing_bytes=" + std::to_string(differing) +
+                   " differing_bits=" + std::to_string(frame_bit_errors) +
                    (by_position ? " actual_frame_id=" + std::to_string(actual.frame_id()) + "(paired by position)" : "") +
                    " (expected " + expected.location() + ", actual " + actual.location() + ")");
         }
@@ -222,6 +231,12 @@ int main(int argc, char** argv) {
                     es.out_of_order == 0 && as.out_of_order == 0 && expected.trailing_bytes() == 0 &&
                     actual.trailing_bytes() == 0 && es.total > 0;
 
+    const std::uint64_t compared_bits = compared * cmb::proto::kWireFrameSize * 8;
+    auto rate = [](std::uint64_t num, std::uint64_t den) {
+        char text[32];
+        std::snprintf(text, sizeof(text), "%.3e", den == 0 ? 0.0 : static_cast<double>(num) / static_cast<double>(den));
+        return std::string(text);
+    };
     std::cout << "frame_bytes=" << cmb::proto::kWireFrameSize << "\n"
               << "expected_frames=" << es.total << " invalid=" << es.invalid << " out_of_order=" << es.out_of_order
               << " trailing_bytes=" << expected.trailing_bytes() << "\n"
@@ -229,6 +244,8 @@ int main(int argc, char** argv) {
               << " trailing_bytes=" << actual.trailing_bytes() << "\n"
               << "identical=" << identical << " mismatched=" << mismatched << " missing=" << missing
               << " unexpected=" << unexpected << "\n"
+              << "compared_bits=" << compared_bits << " bit_errors=" << bit_errors << " ber=" << rate(bit_errors, compared_bits)
+              << " frame_loss_rate=" << rate(missing, es.total) << "\n"
               << "result=" << (ok ? "IDENTICAL" : "DIFFERENT") << "\n";
     return ok ? 0 : 1;
 }

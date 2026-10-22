@@ -23,8 +23,7 @@
 
 namespace {
 
-constexpr std::uint64_t kFramePeriodUs = 5000;
-constexpr std::uint64_t kDefaultSendDeadlineUs = 5500;
+constexpr std::uint64_t kDeadlineSlackUs = 500;  // default deadline = frame period + slack
 
 struct Options {
     std::string host{"127.0.0.1"};
@@ -36,7 +35,8 @@ struct Options {
     std::filesystem::path save_sent_dir{};
     std::filesystem::path input_path{};
     bool validate_input_module{false};
-    std::uint64_t deadline_us{kDefaultSendDeadlineUs};
+    std::uint16_t rate_hz{cmb::proto::kSampleRateHz};
+    std::uint64_t deadline_us{0};  // 0: frame period + kDeadlineSlackUs
 };
 
 std::uint64_t monotonic_ns() {
@@ -75,6 +75,14 @@ std::uint64_t parse_positive_u64(const char* text, const char* description) {
     return static_cast<std::uint64_t>(value);
 }
 
+std::uint16_t parse_rate_hz(const char* text) {
+    const unsigned long value = std::stoul(text);
+    if (value == 0 || value > cmb::proto::kMaxSampleRateHz) {
+        throw std::out_of_range("rate_hz must be in 1.." + std::to_string(cmb::proto::kMaxSampleRateHz));
+    }
+    return static_cast<std::uint16_t>(value);
+}
+
 std::uint16_t parse_module_id(const char* text) {
     const unsigned long value = std::stoul(text);
     if (value > std::numeric_limits<std::uint16_t>::max()) {
@@ -85,7 +93,7 @@ std::uint16_t parse_module_id(const char* text) {
 
 void print_usage() {
     std::cerr << "usage: sender [host] [port] [frame_count]"
-                 " [--module-id <id>] [--bind-host <local-ip>] [--timing-log <path>] [--deadline-us <count>]"
+                 " [--module-id <id>] [--bind-host <local-ip>] [--timing-log <path>] [--deadline-us <count>] [--rate-hz <n>]"
                  " [--save-sent <dir>] [--input <file.bin|dir>]\n";
 }
 
@@ -120,6 +128,11 @@ Options parse_options(int argc, char** argv) {
                 throw std::invalid_argument("--input requires a .bin file or directory");
             }
             options.input_path = argv[index];
+        } else if (argument == "--rate-hz") {
+            if (++index == argc) {
+                throw std::invalid_argument("--rate-hz requires a value");
+            }
+            options.rate_hz = parse_rate_hz(argv[index]);
         } else if (argument == "--deadline-us") {
             if (++index == argc) {
                 throw std::invalid_argument("--deadline-us requires a count");
@@ -139,6 +152,9 @@ Options parse_options(int argc, char** argv) {
         } else {
             throw std::invalid_argument("too many positional arguments");
         }
+    }
+    if (options.deadline_us == 0) {
+        options.deadline_us = 1'000'000 / options.rate_hz + kDeadlineSlackUs;
     }
     return options;
 }
@@ -207,13 +223,14 @@ int main(int argc, char** argv) {
     }
     std::uint64_t first_frame_id = 0;
     std::uint64_t last_frame_id = 0;
-    auto next_tick = std::chrono::steady_clock::now();
-    auto previous_start = next_tick;
+    // Schedule from the start time so 1e9 / rate_hz rounding does not accumulate (240 Hz = 4166666.67 ns).
+    const auto schedule_start = std::chrono::steady_clock::now();
+    auto previous_start = schedule_start;
     std::uint64_t deadline_miss_count = 0;
     std::uint64_t max_late_us = 0;
 
     for (std::uint64_t frame_id = 0; frame_id < options.frame_count; ++frame_id) {
-        const auto scheduled = next_tick;
+        const auto scheduled = schedule_start + std::chrono::nanoseconds(frame_id * 1'000'000'000ULL / options.rate_hz);
         std::this_thread::sleep_until(scheduled);
         const auto send_start = std::chrono::steady_clock::now();
         const auto schedule_late_us = late_us(scheduled, send_start);
@@ -237,6 +254,12 @@ int main(int argc, char** argv) {
                 std::cerr << "sender invalid input frame at " << input->location() << ": " << problem << "\n";
                 return 10;
             }
+            if (frame.header.sample_rate_hz != options.rate_hz) {
+                logger.log(cmb::common::LogLevel::kError, "input frame rate mismatch at " + input->location());
+                std::cerr << "sender input frame sample_rate_hz " << frame.header.sample_rate_hz << " != --rate-hz "
+                          << options.rate_hz << " at " << input->location() << "\n";
+                return 10;
+            }
             if (options.validate_input_module && frame.header.module_id != options.module_id) {
                 logger.log(cmb::common::LogLevel::kError, "input frame module_id mismatch at " + input->location());
                 std::cerr << "sender input frame module_id " << frame.header.module_id << " != --module-id "
@@ -244,7 +267,7 @@ int main(int argc, char** argv) {
                 return 10;
             }
         } else {
-            cmb::sender::fill_frame(frame, frame_id, monotonic_ns(), options.module_id);
+            cmb::sender::fill_frame(frame, frame_id, monotonic_ns(), options.module_id, options.rate_hz);
             cmb::sender::encode_frame_into(frame, bytes);
         }
         if (frame_id == 0) {
@@ -292,7 +315,6 @@ int main(int argc, char** argv) {
                    << (deadline_miss ? 1 : 0) << '\n';
         }
 
-        next_tick += std::chrono::microseconds(kFramePeriodUs);
     }
 
     if (sent_capture && !sent_capture->flush()) {

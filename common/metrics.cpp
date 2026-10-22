@@ -20,7 +20,7 @@ void MetricsWriter::write_header() {
                "recv_gap_avg_us,recv_gap_max_us,recv_gap_p999_us,recv_deadline_us,recv_deadline_miss_count,"
                "recv_max_late_us,recv_parse_avg_us,recv_parse_max_us,capture_queue_capacity,"
                "capture_queue_high_water,capture_queue_overrun_count,storage_write_avg_us,storage_write_max_us,"
-               "cpu_percent,rss_mb\n";
+               "cpu_percent,rss_mb,recv_span_us\n";
     stream_.flush();
 }
 
@@ -62,7 +62,8 @@ void MetricsWriter::append(const std::string& timestamp, const MetricsSnapshot& 
             << snapshot.storage_write_avg_us << ','
             << snapshot.storage_write_max_us << ','
             << snapshot.cpu_percent << ','
-            << snapshot.rss_mb << '\n';
+            << snapshot.rss_mb << ','
+            << snapshot.recv_span_us << '\n';
     stream_.flush();
 }
 

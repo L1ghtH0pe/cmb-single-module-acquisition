@@ -46,6 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--preset", choices=("1000", "10m", "1h"), help="test duration preset (default: 10m when --frames is not given)")
     parser.add_argument("--frames", type=int, help="number of frames (overrides --preset)")
+    parser.add_argument("--rate-hz", type=int, default=200, help="frame rate (default 200; 240 for the margin test)")
     parser.add_argument("--port", type=int, default=9000)
     parser.add_argument("--tx-iface", default=DEFAULT_TX_IFACE)
     parser.add_argument("--rx-iface", default=DEFAULT_RX_IFACE)
@@ -72,9 +73,12 @@ def parse_args() -> argparse.Namespace:
     if args.frames is not None and args.preset:
         parser.error("use either --frames or --preset, not both")
     if args.frames is None:
-        args.frames = {"1000": 1000, "10m": 120000, "1h": 720000}[args.preset or "10m"]
+        seconds = {"1000": None, "10m": 600, "1h": 3600}[args.preset or "10m"]
+        args.frames = 1000 if seconds is None else seconds * args.rate_hz
     if args.frames is None or args.frames <= 0:
         parser.error("provide --frames or --preset")
+    if not 1 <= args.rate_hz <= 1000:
+        parser.error("--rate-hz must be in 1..1000")
     if not 1 <= args.port <= 65535:
         parser.error("--port must be in 1..65535")
     return args
@@ -264,7 +268,7 @@ def main() -> int:
     }
     try:
         print(
-            f"Preparing {args.frames} frames at 200 Hz; TX={args.tx_iface}, RX={args.rx_iface}, "
+            f"Preparing {args.frames} frames at {args.rate_hz} Hz; TX={args.tx_iface}, RX={args.rx_iface}, "
             f"sender_timing={'on' if args.sender_timing else 'off'}, deadline_policy="
             f"{'strict' if args.fail_on_deadline_miss else 'record-only'}.",
             flush=True,
@@ -275,7 +279,7 @@ def main() -> int:
         source_file: Path | None = None
         if args.gen_pattern:
             source_file = output / "captures" / "source.bin"
-            gen_command = command_as_user(run_user, [str(build_dir / "frame_gen"), str(source_file), str(args.frames), "--pattern", args.gen_pattern])
+            gen_command = command_as_user(run_user, [str(build_dir / "frame_gen"), str(source_file), str(args.frames), "--pattern", args.gen_pattern, "--rate-hz", str(args.rate_hz)])
             gen_result = run(gen_command, check=False)
             save_command(output, "frame-gen", gen_command, gen_result)
             if gen_result.returncode != 0:
@@ -298,17 +302,17 @@ def main() -> int:
             raise RuntimeError("namespace ping failed")
 
         before = capture_baseline(output, "before", args.tx_ns, args.rx_ns, args.tx_iface, args.rx_iface)
-        duration = args.frames / 200.0
+        duration = args.frames / args.rate_hz
         timeout = duration + args.timeout_slack
         receiver_out = (output / "receiver.stdout").open("w")
         receiver_err = (output / "receiver.stderr").open("w")
-        receiver_command = ["ip", "netns", "exec", args.rx_ns, "runuser", "-u", run_user, "--", str(receiver), str(args.port), str(args.frames), rx_ip, "--timing-log", "logs/receiver-timing.csv"]
+        receiver_command = ["ip", "netns", "exec", args.rx_ns, "runuser", "-u", run_user, "--", str(receiver), str(args.port), str(args.frames), rx_ip, "--rate-hz", str(args.rate_hz), "--timing-log", "logs/receiver-timing.csv"]
         receiver_proc = subprocess.Popen(receiver_command, cwd=output, stdout=receiver_out, stderr=receiver_err, text=True)
         wait_for_listener(receiver_proc, output / "logs" / "receiver-runtime.log", time.monotonic() + args.startup_timeout)
 
         sender_out = (output / "sender.stdout").open("w")
         sender_err = (output / "sender.stderr").open("w")
-        sender_command = ["ip", "netns", "exec", args.tx_ns, "runuser", "-u", run_user, "--", str(sender), rx_ip, str(args.port), str(args.frames), "--save-sent", "captures/sent"]
+        sender_command = ["ip", "netns", "exec", args.tx_ns, "runuser", "-u", run_user, "--", str(sender), rx_ip, str(args.port), str(args.frames), "--rate-hz", str(args.rate_hz), "--save-sent", "captures/sent"]
         if source_file:
             sender_command.extend(["--input", str(source_file)])
         if args.sender_timing:

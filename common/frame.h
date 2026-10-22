@@ -11,7 +11,8 @@ namespace cmb::proto {
 inline constexpr std::uint32_t kFrameMagic = 0x434D4231;  // CMB1
 inline constexpr std::uint16_t kProtocolVersion = 2;
 inline constexpr std::uint16_t kChannelCount = 1704;
-inline constexpr std::uint16_t kSampleRateHz = 200;
+inline constexpr std::uint16_t kSampleRateHz = 200;      // default frame rate; configurable per run
+inline constexpr std::uint16_t kMaxSampleRateHz = 1000;
 inline constexpr std::uint16_t kSampleFormatComplexInt32 = 1;  // per channel: int32_le re, then int32_le im
 inline constexpr std::size_t kSampleBytes = 2 * sizeof(std::int32_t);
 inline constexpr std::size_t kPayloadBytes = kChannelCount * kSampleBytes;

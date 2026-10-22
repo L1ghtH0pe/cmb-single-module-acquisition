@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Independent .bin checker: re-implements the wire format in Python and uses zlib.crc32.
 
-usage: verify_bin.py <file.bin|dir> [--expect-frames N]
+usage: verify_bin.py <file.bin|dir> [--expect-frames N] [--rate-hz N]
 
 Shares no code with sender/receiver/frame_compare, so it can cross-check them.
 Checks every frame's fixed fields, payload_len, header CRC, payload CRC and that
@@ -17,6 +17,7 @@ import zlib
 from pathlib import Path
 
 HEADER_LEN = 44
+EXPECTED_RATE = 200  # overridden by --rate-hz
 CHANNELS = 1704
 PAYLOAD_LEN = CHANNELS * 8
 FRAME_BYTES = 4 + HEADER_LEN + PAYLOAD_LEN + 4
@@ -38,7 +39,7 @@ def check_frame(frame: bytes) -> tuple[int | None, str]:
     (magic, version, header_size, _module, _flags, frame_id, _ts,
      channels, rate, fmt, _reserved, payload_len, header_crc) = HEADER.unpack(header)
     expected = {"magic": (magic, 0x434D4231), "version": (version, 2), "header_size": (header_size, 44),
-                "channel_count": (channels, CHANNELS), "sample_rate_hz": (rate, 200),
+                "channel_count": (channels, CHANNELS), "sample_rate_hz": (rate, EXPECTED_RATE),
                 "sample_format": (fmt, 1), "payload_len": (payload_len, PAYLOAD_LEN)}
     for name, (got, want) in expected.items():
         if got != want:
@@ -56,7 +57,10 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("path", type=Path)
     parser.add_argument("--expect-frames", type=int)
+    parser.add_argument("--rate-hz", type=int, default=200)
     args = parser.parse_args()
+    global EXPECTED_RATE
+    EXPECTED_RATE = args.rate_hz
 
     digest = hashlib.sha256()
     frames = bad = order_errors = trailing = 0

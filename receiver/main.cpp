@@ -26,13 +26,12 @@
 
 namespace {
 
-constexpr std::uint64_t kFramePeriodUs = 5000;
 constexpr std::uint64_t kRecvDeadlineSlackUs = 500;
-constexpr std::uint64_t kRecvDeadlineUs = kFramePeriodUs + kRecvDeadlineSlackUs;
 constexpr std::size_t kDefaultCaptureQueueFrames = 1024;
 constexpr std::size_t kStorageFlushFrames = 200;
 
 struct Options {
+    std::uint16_t rate_hz{cmb::proto::kSampleRateHz};
     std::uint16_t port{9000};
     std::uint64_t expected_frames{1000};
     std::string bind_host{"0.0.0.0"};
@@ -74,6 +73,14 @@ std::size_t parse_queue_frames(const char* text) {
     return static_cast<std::size_t>(value);
 }
 
+std::uint16_t parse_rate_hz(const char* text) {
+    const unsigned long value = std::stoul(text);
+    if (value == 0 || value > cmb::proto::kMaxSampleRateHz) {
+        throw std::out_of_range("rate_hz must be in 1.." + std::to_string(cmb::proto::kMaxSampleRateHz));
+    }
+    return static_cast<std::uint16_t>(value);
+}
+
 std::uint16_t parse_module_id(const char* text) {
     const unsigned long value = std::stoul(text);
     if (value > std::numeric_limits<std::uint16_t>::max()) {
@@ -84,7 +91,7 @@ std::uint16_t parse_module_id(const char* text) {
 
 void print_usage() {
     std::cerr << "usage: receiver [port] [expected_frame_count] [bind_host]"
-                 " [--module-id <id>] [--timing-log <path>] [--capture-queue-frames <count>]\n";
+                 " [--module-id <id>] [--timing-log <path>] [--capture-queue-frames <count>] [--rate-hz <n>]\n";
 }
 
 Options parse_options(int argc, char** argv) {
@@ -103,6 +110,11 @@ Options parse_options(int argc, char** argv) {
                 throw std::invalid_argument("--timing-log requires a path");
             }
             options.timing_log = argv[index];
+        } else if (argument == "--rate-hz") {
+            if (++index == argc) {
+                throw std::invalid_argument("--rate-hz requires a value");
+            }
+            options.rate_hz = parse_rate_hz(argv[index]);
         } else if (argument == "--capture-queue-frames") {
             if (++index == argc) {
                 throw std::invalid_argument("--capture-queue-frames requires a count");
@@ -138,6 +150,7 @@ int main(int argc, char** argv) {
         return 64;
     }
 
+    const std::uint64_t recv_deadline_us = 1'000'000 / options.rate_hz + kRecvDeadlineSlackUs;
     std::filesystem::create_directories("logs");
     std::filesystem::create_directories("captures/raw");
     cmb::common::Logger logger{"logs/receiver-runtime.log"};
@@ -163,13 +176,16 @@ int main(int argc, char** argv) {
     logger.log(cmb::common::LogLevel::kInfo, "listening on " + options.bind_host + ":" + std::to_string(options.port));
     std::cout << "receiver listening on " << options.bind_host << ':' << options.port << std::endl;
 
+    // Allocate the capture queue before accepting so the first frames are read as they arrive
+    // instead of piling up in the socket buffer during allocation.
+    cmb::receiver::CaptureQueue capture_queue{options.capture_queue_frames};
+
     if (!receiver.accept_one()) {
         logger.log(cmb::common::LogLevel::kError, "failed to accept client");
         return 2;
     }
     logger.log(cmb::common::LogLevel::kInfo, "client accepted");
 
-    cmb::receiver::CaptureQueue capture_queue{options.capture_queue_frames};
     std::mutex queue_mutex;
     std::condition_variable queue_ready;
     std::atomic<bool> acquisition_done{false};
@@ -224,6 +240,7 @@ int main(int argc, char** argv) {
     cmb::common::LatencyStats recv_gap_stats;
     cmb::common::LatencyStats parse_stats;
     std::chrono::steady_clock::time_point previous_wire_complete{};
+    std::chrono::steady_clock::time_point first_wire_complete{};
     bool has_previous_wire_complete{false};
     cmb::proto::Frame frame;
     std::uint64_t exit_code = 0;
@@ -256,12 +273,15 @@ int main(int argc, char** argv) {
         if (has_previous_wire_complete) {
             gap_us = micros_between(previous_wire_complete, wire_complete);
             recv_gap_stats.add(gap_us);
-            if (gap_us > kRecvDeadlineUs) {
+            if (gap_us > recv_deadline_us) {
                 deadline_miss = true;
-                late_us = gap_us - kRecvDeadlineUs;
+                late_us = gap_us - recv_deadline_us;
                 ++snapshot.recv_deadline_miss_count;
                 snapshot.recv_max_late_us = std::max(snapshot.recv_max_late_us, late_us);
             }
+        }
+        if (!has_previous_wire_complete) {
+            first_wire_complete = wire_complete;
         }
         previous_wire_complete = wire_complete;
         has_previous_wire_complete = true;
@@ -278,6 +298,14 @@ int main(int argc, char** argv) {
             }
             logger.log(cmb::common::LogLevel::kError, "parse failed: " + parse_message);
             exit_code = 4;
+            break;
+        }
+        if (frame.header.sample_rate_hz != options.rate_hz) {
+            ++snapshot.parse_fail_count;
+            logger.log(cmb::common::LogLevel::kError,
+                       "unexpected sample_rate_hz: " + std::to_string(frame.header.sample_rate_hz) + ", expected " +
+                           std::to_string(options.rate_hz));
+            exit_code = 5;
             break;
         }
         if (options.validate_module_id && frame.header.module_id != options.expected_module_id) {
@@ -300,7 +328,7 @@ int main(int argc, char** argv) {
         queue_ready.notify_one();
 
         if (timing) {
-            timing << frame.header.frame_id << ',' << wire_complete_ns << ',' << gap_us << ',' << kRecvDeadlineUs << ','
+            timing << frame.header.frame_id << ',' << wire_complete_ns << ',' << gap_us << ',' << recv_deadline_us << ','
                    << late_us << ',' << (deadline_miss ? 1 : 0) << ',' << parse_us << ',' << queue_depth << '\n';
         }
     }
@@ -319,9 +347,10 @@ int main(int argc, char** argv) {
     snapshot.frame_id_end = continuity_stats.frame_count > 0 ? continuity_stats.last_frame_id : 0;
     snapshot.frame_count = continuity_stats.frame_count;
     snapshot.recv_gap_avg_us = recv_gap_stats.average();
+    snapshot.recv_span_us = has_previous_wire_complete ? micros_between(first_wire_complete, previous_wire_complete) : 0;
     snapshot.recv_gap_max_us = recv_gap_stats.max();
     snapshot.recv_gap_p999_us = recv_gap_stats.percentile(0.999);
-    snapshot.recv_deadline_us = kRecvDeadlineUs;
+    snapshot.recv_deadline_us = recv_deadline_us;
     snapshot.recv_parse_avg_us = parse_stats.average();
     snapshot.recv_parse_max_us = parse_stats.max();
     snapshot.capture_queue_capacity = capture_queue.capacity();

@@ -45,6 +45,7 @@ struct MetricsSnapshot {
     std::uint64_t storage_write_max_us{0};
     double cpu_percent{0.0};
     std::uint64_t rss_mb{0};
+    std::uint64_t recv_span_us{0};  // first to last frame wire-complete time; frame rate = (frame_count - 1) / span
 };
 
 class MetricsWriter {

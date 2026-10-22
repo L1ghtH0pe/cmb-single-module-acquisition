@@ -131,7 +131,7 @@ def bit_flip_sweep(r: Runner, base: list[bytearray], exhaustive: bool) -> None:
     rc, out = r.run(actual, expected)
 
     mismatch = {int(m.group(1)): (int(m.group(2)), m.group(3), int(m.group(4)))
-                for m in re.finditer(r"MISMATCH frame_id=(\d+) first_offset=(\d+) field=(\S+) .* differing_bytes=(\d+)", out)}
+                for m in re.finditer(r"MISMATCH frame_id=(\d+) first_offset=(\d+) field=(\S+) .* differing_bytes=(\d+) differing_bits=1 ", out)}
     problems = []
     for n, offset in enumerate(offsets):
         got = mismatch.get(n)
@@ -142,6 +142,8 @@ def bit_flip_sweep(r: Runner, base: list[bytearray], exhaustive: bool) -> None:
     invalid = len(re.findall(r"INVALID actual", out))
     if rc != 1:
         problems.append(f"exit {rc}")
+    if f"bit_errors={len(offsets)} " not in out:
+        problems.append(f"bit_errors != {len(offsets)} (one flipped bit per frame)")
     if invalid != len(offsets):  # every single-bit flip must also fail a CRC or a fixed-field check
         problems.append(f"INVALID lines {invalid} != {len(offsets)}")
     name = f"single-bit flip at {len(offsets)} offsets ({'all' if exhaustive else 'all header/CRC + sampled payload'})"
@@ -201,6 +203,12 @@ def main() -> int:
                      counts={"mismatched": 1})
         nonzero = sum(1 for b in base[11][PAYLOAD_OFFSET:PAYLOAD_OFFSET + PAYLOAD_LEN] if b) + \
             sum(1 for a, b in zip(base[11][-4:], f[11][-4:]) if a != b)
+        flipped = sum(bin(x ^ y).count("1") for x, y in zip(base[11], f[11]))
+        if f"differing_bits={flipped} " not in out or f"bit_errors={flipped} " not in out:
+            failures.append("bit count")
+            print(f"[FAIL] differing_bits/bit_errors: want {flipped}")
+        else:
+            print(f"[PASS] differing_bits=bit_errors={flipped} matches independent count")
         if f"differing_bytes={nonzero}" not in out:
             failures.append("differing_bytes count")
             print(f"[FAIL] differing_bytes count: want {nonzero}")

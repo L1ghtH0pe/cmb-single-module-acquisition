@@ -185,7 +185,7 @@ std::string validate_frame(const Frame& frame) {
     if (frame.header.channel_count != kChannelCount) {
         return "unexpected channel count";
     }
-    if (frame.header.sample_rate_hz != kSampleRateHz) {
+    if (frame.header.sample_rate_hz == 0 || frame.header.sample_rate_hz > kMaxSampleRateHz) {
         return "unexpected sample rate";
     }
     if (frame.header.sample_format != kSampleFormatComplexInt32) {

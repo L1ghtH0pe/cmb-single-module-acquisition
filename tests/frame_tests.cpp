@@ -110,9 +110,33 @@ void test_validate_rejects_unknown_sample_format() {
     assert(cmb::proto::validate_frame(restored) == "unexpected sample format");
 }
 
+void test_crc32_matches_reference() {
+    const char* check = "123456789";
+    const auto* bytes = reinterpret_cast<const std::byte*>(check);
+    assert(cmb::proto::crc32(std::span<const std::byte>(bytes, 9)) == 0xCBF43926u);
+    assert(cmb::proto::crc32(std::span<const std::byte>()) == 0u);
+
+    // Every length 0..64 against the bitwise definition, so the 8-byte and tail paths both run.
+    std::vector<std::byte> data(64);
+    for (std::size_t i = 0; i < data.size(); ++i) {
+        data[i] = static_cast<std::byte>(i * 37 + 11);
+    }
+    for (std::size_t len = 0; len <= data.size(); ++len) {
+        std::uint32_t crc = 0xFFFFFFFFu;
+        for (std::size_t i = 0; i < len; ++i) {
+            crc ^= static_cast<std::uint8_t>(data[i]);
+            for (int bit = 0; bit < 8; ++bit) {
+                crc = (crc >> 1u) ^ ((crc & 1u) ? 0xEDB88320u : 0u);
+            }
+        }
+        assert(cmb::proto::crc32(std::span<const std::byte>(data.data(), len)) == ~crc);
+    }
+}
+
 }  // namespace
 
 int main() {
+    test_crc32_matches_reference();
     test_round_trip();
     test_reserialize_round_trip();
     test_validate_rejects_bad_magic();

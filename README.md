@@ -20,7 +20,7 @@
 - TCP 长连接承载应用层 frame；TCP 本身只提供字节流。
 - 协议版本为 v2，所有线上整数均按 little-endian 编码。
 - 每帧包含 1704 个通道的复数采样（实部、虚部各一个 `int32`），即 13632 bytes payload。
-- sender 默认以 200 Hz（5 ms）周期生成模拟数据，每路 `frame_id` 从 0 递增。
+- sender 默认以 200 Hz（5 ms）周期发送，`--rate-hz` 可改为其他帧速率（如 240 Hz 拉偏测试），每路 `frame_id` 从 0 递增。
 - receiver 检查 magic、版本、长度、采样格式、header CRC、payload CRC 和 frame 合法性。
 
 ## 数据格式
@@ -53,7 +53,7 @@ TCP 不保留消息边界。receiver 必须按帧长收齐字节再解析；不�
 | 16 | 12 | 8 | `uint64_le` | `frame_id` | 每个 sender 从 `0` 连续递增 |
 | 24 | 20 | 8 | `uint64_le` | `timestamp_ns` | sender 的单调时钟时间戳，单位 ns |
 | 32 | 28 | 2 | `uint16_le` | `channel_count` | `1704` |
-| 34 | 30 | 2 | `uint16_le` | `sample_rate_hz` | `200` |
+| 34 | 30 | 2 | `uint16_le` | `sample_rate_hz` | 帧速率，默认 `200`；receiver 按 `--rate-hz` 校验 |
 | 36 | 32 | 2 | `uint16_le` | `sample_format` | `1` = complex int32（re 在前，im 在后） |
 | 38 | 34 | 2 | `uint16_le` | `reserved` | `0` |
 | 40 | 36 | 4 | `uint32_le` | `payload_len` | `13632` |
@@ -255,6 +255,27 @@ module_id tx_iface rx_iface tx_ip rx_ip port tx_namespace rx_namespace
 每个角色默认写入 `/tmp/cmb-multi-host/<role>/`，每个 module 使用独立工作目录、日志、metrics 和 capture。sender 通过 `--bind-host <tx_ip>` 绑定对应源地址；receiver 绑定 `<rx_ip>:<port>`。脚本不会配置物理接口、地址、VLAN、路由或交换机，也不会创建 namespace。如果配置中填写了 namespace，它必须事先存在；不使用时写 `-`。
 
 `tx_iface` 和 `rx_iface` 用于记录通道与现场端口的映射，启动器实际按 IP 绑定。普通电脑只有一个汇聚网口时，10 行可以使用相同 `rx_iface` 和 `rx_ip`，但端口和 module_id 必须唯一。下位机 10 个接口若处于同一二层或重叠网段，仅绑定源 IP 不足以保证正确选路，网络负责人还需配置独立子网、VLAN、策略路由或 namespace。
+
+### 多路测试（测试方案流程）
+
+`run-multi-host.sh` 按配置文件批量运行各路，共 4 个角色：
+
+| 角色 | 主机 | 作用 |
+|---|---|---|
+| `prepare` | 下位机、控制主机 | 每路用 frame_gen 生成源数据文件（伪随机图样，种子 = module_id + 1） |
+| `receiver` | 控制主机 | 每路启动 receiver，全部监听后输出 `ready:` |
+| `sender` | 下位机 | 每路以 `--rate-hz` 发送源数据文件 |
+| `report` | 控制主机 | 每路用 frame_compare 比对源数据与接收数据，生成 `report.md`、`report.csv` |
+
+```bash
+C="--config configs/sim-17.conf --frames 8640000 --rate-hz 200"
+./tools/run-multi-host.sh --role prepare  $C --source-dir <源数据目录>
+./tools/run-multi-host.sh --role receiver $C --output <输出目录>
+./tools/run-multi-host.sh --role sender   $C --source-dir <源数据目录> --output <输出目录>
+./tools/run-multi-host.sh --role report   $C --source-dir <源数据目录> --output <输出目录>
+```
+
+`configs/sim-17.example.conf` 是 17 路现场配置模板，`configs/sim-17.localhost.conf` 用于在一台机器上演练。启动前检查磁盘空间；输出目录已有结果时拒绝覆盖。
 
 ### 单路双机运行
 

@@ -1,10 +1,10 @@
 // frame_gen: write a source .bin of simulated wire frames for sender --input.
 //
-// usage: frame_gen <output.bin> <frame_count> [--module-id <id>] [--pattern counter|random] [--seed <n>]
+// usage: frame_gen <output.bin> <frame_count> [--module-id <id>] [--pattern counter|random] [--seed <n>] [--rate-hz <n>]
 //
 // counter: same deterministic values as the live sender (re = frame_id + channel, im = ~re).
 // random:  pseudo-random int32 re/im from a seeded xorshift64*, so every bit position is exercised.
-// timestamp_ns is set to frame_id * 5 ms so the file is reproducible.
+// timestamp_ns is set to frame_id / rate_hz seconds so the file is reproducible.
 
 #include "common/capture_writer.h"
 #include "common/frame.h"
@@ -25,6 +25,7 @@ struct Options {
     std::uint16_t module_id{0};
     bool random{false};
     std::uint64_t seed{0x434D4231ULL};
+    std::uint16_t rate_hz{cmb::proto::kSampleRateHz};
 };
 
 std::uint64_t xorshift64star(std::uint64_t& state) {
@@ -51,6 +52,12 @@ Options parse(int argc, char** argv) {
                 throw std::invalid_argument("pattern must be counter or random");
             }
             options.random = pattern == "random";
+        } else if (arg == "--rate-hz" && i + 1 < argc) {
+            const auto value = std::stoul(argv[++i]);
+            if (value == 0 || value > cmb::proto::kMaxSampleRateHz) {
+                throw std::out_of_range("rate_hz must be in 1.." + std::to_string(cmb::proto::kMaxSampleRateHz));
+            }
+            options.rate_hz = static_cast<std::uint16_t>(value);
         } else if (arg == "--seed" && i + 1 < argc) {
             options.seed = std::stoull(argv[++i]);
         } else if (arg.starts_with("--")) {
@@ -80,7 +87,7 @@ int main(int argc, char** argv) {
     try {
         options = parse(argc, argv);
     } catch (const std::exception& ex) {
-        std::cerr << "usage: frame_gen <output.bin> <frame_count> [--module-id <id>] [--pattern counter|random] [--seed <n>]\n"
+        std::cerr << "usage: frame_gen <output.bin> <frame_count> [--module-id <id>] [--pattern counter|random] [--seed <n>] [--rate-hz <n>]\n"
                   << "frame_gen argument error: " << ex.what() << "\n";
         return 64;
     }
@@ -96,7 +103,7 @@ int main(int argc, char** argv) {
     {
         cmb::common::CaptureWriter writer{tmp_dir, static_cast<std::size_t>(options.frames)};
         for (std::uint64_t id = 0; id < options.frames; ++id) {
-            cmb::sender::fill_frame(frame, id, id * 5'000'000ULL, options.module_id);
+            cmb::sender::fill_frame(frame, id, id * 1'000'000'000ULL / options.rate_hz, options.module_id, options.rate_hz);
             if (options.random) {
                 for (auto& sample : frame.payload) {
                     const auto word = xorshift64star(state);

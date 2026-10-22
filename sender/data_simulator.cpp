@@ -15,9 +15,11 @@ cmb::proto::ComplexSample simulated_sample(std::uint64_t frame_id, std::size_t c
     return {static_cast<std::int32_t>(base), static_cast<std::int32_t>(~base)};
 }
 
-void fill_frame(cmb::proto::Frame& frame, std::uint64_t frame_id, std::uint64_t timestamp_ns, std::uint16_t module_id) {
+void fill_frame(cmb::proto::Frame& frame, std::uint64_t frame_id, std::uint64_t timestamp_ns, std::uint16_t module_id,
+                std::uint16_t sample_rate_hz) {
     frame.header = {};
     frame.header.module_id = module_id;
+    frame.header.sample_rate_hz = sample_rate_hz;
     frame.header.frame_id = frame_id;
     frame.header.timestamp_ns = timestamp_ns;
     if (frame.payload.size() != cmb::proto::kChannelCount) {

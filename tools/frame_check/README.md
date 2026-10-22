@@ -65,7 +65,7 @@ cmake --build build -j2
 ## 3. frame_gen
 
 ```bash
-./build/frame_gen <output.bin> <frame_count> [--module-id <id>] [--pattern counter|random] [--seed <n>]
+./build/frame_gen <output.bin> <frame_count> [--module-id <id>] [--pattern counter|random] [--seed <n>] [--rate-hz <n>]
 ```
 
 | 参数 | 说明 |
@@ -75,8 +75,9 @@ cmake --build build -j2
 | `--pattern counter` | 默认。`re = frame_id + channel`，`im = ~re`，与 sender 实时模拟一致，便于肉眼核对 |
 | `--pattern random` | 用固定种子的伪随机数填满 re/im，每个 bit 位都会被覆盖，更容易暴露位翻转 |
 | `--seed` | random 模式种子，同一种子生成的文件逐字节相同 |
+| `--rate-hz <n>` | 写入帧头的帧速率，默认 200；须与 sender/receiver 的 `--rate-hz` 一致 |
 
-`frame_id` 从 0 递增，`timestamp_ns = frame_id × 5 ms`，所以同样的参数总是生成同样的文件。
+`frame_id` 从 0 递增，`timestamp_ns = frame_id / rate_hz` 秒，所以同样的参数总是生成同样的文件。
 
 ## 4. sender 相关参数
 
@@ -117,6 +118,7 @@ frame_bytes=13684
 expected_frames=12000 invalid=0 out_of_order=0 trailing_bytes=0
 actual_frames=12000 invalid=0 out_of_order=0 trailing_bytes=0
 identical=12000 mismatched=0 missing=0 unexpected=0
+compared_bits=1313664000 bit_errors=0 ber=0.000e+00 frame_loss_rate=0.000e+00
 result=IDENTICAL
 ```
 
